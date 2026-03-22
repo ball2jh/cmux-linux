@@ -15,6 +15,8 @@ const glib = @import("glib");
 const gio = @import("gio");
 const gtk = @import("gtk");
 
+const handler_v2 = @import("handler_v2.zig");
+
 const log = std.log.scoped(.cmux_socket);
 
 /// Maximum number of concurrent client connections.
@@ -244,15 +246,21 @@ pub const Server = struct {
             const trimmed = std.mem.trim(u8, line, &[_]u8{ '\r', ' ', '\t' });
 
             if (trimmed.len > 0) {
-                var command: []const u8 = trimmed;
-                var args: []const u8 = "";
-                if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
-                    command = trimmed[0..space_pos];
-                    args = std.mem.trim(u8, trimmed[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
-                }
+                // Auto-detect V1 (text) vs V2 (JSON) by first character
+                if (trimmed[0] == '{') {
+                    // V2 JSON-RPC
+                    handler_v2.handleJsonRpc(self.handler_ctx, self.alloc, trimmed, client.fd);
+                } else {
+                    // V1 text protocol
+                    var command: []const u8 = trimmed;
+                    var args: []const u8 = "";
+                    if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+                        command = trimmed[0..space_pos];
+                        args = std.mem.trim(u8, trimmed[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
+                    }
 
-                // Dispatch to handler (handler writes response directly)
-                self.handler(self.handler_ctx, self.alloc, command, args, client.fd);
+                    self.handler(self.handler_ctx, self.alloc, command, args, client.fd);
+                }
             }
 
             // Remove processed data from buffer

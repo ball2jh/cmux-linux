@@ -50,6 +50,8 @@ pub fn handleCommand(
         Server.respond(client_fd, "ok");
     } else if (std.mem.eql(u8, command, "notify")) {
         cmdNotify(args, client_fd);
+    } else if (std.mem.eql(u8, command, "read-screen")) {
+        cmdReadScreen(app, alloc, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -145,6 +147,30 @@ fn cmdClearNotifications() void {
     store.clear(null);
 }
 
+fn cmdReadScreen(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "error: no active surface");
+        return;
+    };
+
+    // Lock the renderer state and read the viewport text
+    surface.renderer_state.mutex.lock();
+    defer surface.renderer_state.mutex.unlock();
+
+    const text = surface.io.terminal.plainString(alloc) catch {
+        Server.respond(client_fd, "error: failed to read screen");
+        return;
+    };
+    defer alloc.free(text);
+
+    if (text.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        _ = posix.write(client_fd, text) catch {};
+        _ = posix.write(client_fd, "\n") catch {};
+    }
+}
+
 fn cmdNotify(args: []const u8, client_fd: posix.fd_t) void {
     // Format: notify <title> [body]
     // Title and body are separated by first space
@@ -175,7 +201,7 @@ fn cmdQuit(app: *gtk.Application) void {
 
 /// Get the active core Surface from the GTK Application.
 /// Walks: Application → active Window → active Tab → active Surface → core Surface
-fn getActiveSurface(app: *gtk.Application) ?*CoreSurface {
+pub fn getActiveSurface(app: *gtk.Application) ?*CoreSurface {
     // Get the active window from the app
     const active_gtk_window = app.getActiveWindow() orelse return null;
 

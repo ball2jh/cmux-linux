@@ -10,6 +10,7 @@ const build_config = @import("../build_config.zig");
 
 pub const socket = @import("socket/server.zig");
 pub const handler_v1 = @import("socket/handler_v1.zig");
+pub const handler_v2 = @import("socket/handler_v2.zig");
 pub const notification = @import("notification/store.zig");
 
 test {
