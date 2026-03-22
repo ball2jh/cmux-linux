@@ -18,6 +18,7 @@ const Window = @import("../../apprt/gtk/class/window.zig").Window;
 const GtkSurface = @import("../../apprt/gtk/class/surface.zig").Surface;
 const CoreSurface = @import("../../Surface.zig");
 const notification_store = @import("../notification/store.zig");
+const workspace_mgr = @import("../workspace/manager.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -52,6 +53,18 @@ pub fn handleCommand(
         cmdNotify(args, client_fd);
     } else if (std.mem.eql(u8, command, "read-screen")) {
         cmdReadScreen(app, alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "list-workspaces")) {
+        cmdListWorkspaces(alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "new-workspace")) {
+        cmdNewWorkspace(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "select-workspace")) {
+        cmdSelectWorkspace(args, client_fd);
+    } else if (std.mem.eql(u8, command, "close-workspace")) {
+        cmdCloseWorkspace(args, client_fd);
+    } else if (std.mem.eql(u8, command, "rename-workspace")) {
+        cmdRenameWorkspace(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "current-workspace")) {
+        cmdCurrentWorkspace(client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -197,6 +210,104 @@ fn cmdNotify(args: []const u8, client_fd: posix.fd_t) void {
 fn cmdQuit(app: *gtk.Application) void {
     const action_group = app.as(gio.ActionGroup);
     action_group.activateAction("quit", null);
+}
+
+fn cmdListWorkspaces(alloc: Allocator, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const text = mgr.formatText(alloc) catch {
+        Server.respond(client_fd, "error: failed to format workspaces");
+        return;
+    };
+    defer alloc.free(text);
+    if (text.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        _ = posix.write(client_fd, text) catch {};
+    }
+}
+
+fn cmdNewWorkspace(_: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: workspace manager not initialized");
+        return;
+    };
+    const name = if (args.len > 0) args else "workspace";
+    const id = mgr.create(name, null) catch {
+        Server.respond(client_fd, "error: failed to create workspace");
+        return;
+    };
+
+    var buf: [64]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "{d}", .{id}) catch "error";
+    Server.respond(client_fd, resp);
+}
+
+fn cmdSelectWorkspace(args: []const u8, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: workspace manager not initialized");
+        return;
+    };
+    const id = std.fmt.parseInt(u64, args, 10) catch {
+        Server.respond(client_fd, "error: invalid workspace id");
+        return;
+    };
+    if (mgr.select(id)) {
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: workspace not found");
+    }
+}
+
+fn cmdCloseWorkspace(args: []const u8, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: workspace manager not initialized");
+        return;
+    };
+    const id = std.fmt.parseInt(u64, args, 10) catch {
+        Server.respond(client_fd, "error: invalid workspace id");
+        return;
+    };
+    if (mgr.close(id)) {
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: workspace not found");
+    }
+}
+
+fn cmdRenameWorkspace(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    _ = alloc;
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: workspace manager not initialized");
+        return;
+    };
+    // Format: rename-workspace <id> <new-name>
+    const space_pos = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: rename-workspace <id> <name>");
+        return;
+    };
+    const id = std.fmt.parseInt(u64, args[0..space_pos], 10) catch {
+        Server.respond(client_fd, "error: invalid workspace id");
+        return;
+    };
+    const new_name = std.mem.trim(u8, args[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
+    if (mgr.rename(id, new_name) catch false) {
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: workspace not found");
+    }
+}
+
+fn cmdCurrentWorkspace(client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "0");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "{d}", .{mgr.activeId()}) catch "0";
+    Server.respond(client_fd, resp);
 }
 
 /// Get the active core Surface from the GTK Application.

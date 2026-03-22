@@ -12,6 +12,7 @@ const build_config = @import("../../../build_config.zig");
 const cmux_socket = if (build_config.cmux) @import("../../../cmux/socket/server.zig") else struct {};
 const cmux_handler_v1 = if (build_config.cmux) @import("../../../cmux/socket/handler_v1.zig") else struct {};
 const cmux_notifications = if (build_config.cmux) @import("../../../cmux/notification/store.zig") else struct {};
+const cmux_workspaces = if (build_config.cmux) @import("../../../cmux/workspace/manager.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -446,6 +447,7 @@ pub const Application = extern struct {
                 priv.cmux_server = null;
             }
             cmux_notifications.deinitGlobal(alloc);
+            cmux_workspaces.deinitGlobal(alloc);
         }
 
         priv.config.unref();
@@ -1319,10 +1321,13 @@ pub const Application = extern struct {
         // Setup our global shortcuts
         self.startupGlobalShortcuts();
 
-        // Initialize cmux notification store and socket server
+        // Initialize cmux subsystems and socket server
         if (comptime build_config.cmux) {
             cmux_notifications.initGlobal(self.allocator()) catch |err| {
                 log.err("failed to init cmux notification store: {}", .{err});
+            };
+            cmux_workspaces.initGlobal(self.allocator()) catch |err| {
+                log.err("failed to init cmux workspace manager: {}", .{err});
             };
             self.startupCmuxSocket();
         }

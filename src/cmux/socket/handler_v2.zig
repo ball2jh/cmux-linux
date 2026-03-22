@@ -15,6 +15,7 @@ const gtk = @import("gtk");
 
 const Server = @import("server.zig").Server;
 const handler_v1 = @import("handler_v1.zig");
+const workspace_mgr = @import("../workspace/manager.zig");
 
 const log = std.log.scoped(.cmux_v2);
 
@@ -73,8 +74,6 @@ fn dispatch(
     id: ?std.json.Value,
     client_fd: posix.fd_t,
 ) void {
-    _ = params; // TODO: use params for parameterized methods
-
     if (std.mem.eql(u8, method, "system.capabilities")) {
         respondOkRaw(alloc, client_fd, id, "{\"v1\":true,\"v2\":true,\"send\":true,\"read_screen\":true,\"notifications\":true}");
     } else if (std.mem.eql(u8, method, "system.ping")) {
@@ -94,6 +93,18 @@ fn dispatch(
         respondError(alloc, client_fd, id, "not_implemented", "use V1 'send' command for now");
     } else if (std.mem.eql(u8, method, "surface.read_text")) {
         v2ReadScreen(app, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.list")) {
+        v2WorkspaceList(alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.current")) {
+        v2WorkspaceCurrent(alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.create")) {
+        v2WorkspaceCreate(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.select")) {
+        v2WorkspaceSelect(params, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.close")) {
+        v2WorkspaceClose(params, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.rename")) {
+        v2WorkspaceRename(params, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.list")) {
         v2ListNotifications(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.clear")) {
@@ -178,6 +189,135 @@ fn v2ListNotifications(alloc: Allocator, id: ?std.json.Value, client_fd: posix.f
     writer.writeAll("]") catch return;
 
     respondOkRaw(alloc, client_fd, id, buf.items);
+}
+
+fn v2WorkspaceList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondOkRaw(alloc, client_fd, id, "[]");
+        return;
+    };
+    const json_str = mgr.formatJson(alloc) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to format workspaces");
+        return;
+    };
+    defer alloc.free(json_str);
+    respondOkRaw(alloc, client_fd, id, json_str);
+}
+
+fn v2WorkspaceCurrent(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondOkRaw(alloc, client_fd, id, "0");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    const num = std.fmt.bufPrint(&buf, "{d}", .{mgr.activeId()}) catch "0";
+    respondOkRaw(alloc, client_fd, id, num);
+}
+
+fn v2WorkspaceCreate(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+
+    var name: []const u8 = "workspace";
+    if (params) |p| {
+        if (p == .object) {
+            if (p.object.get("name")) |n| {
+                if (n == .string) name = n.string;
+            }
+        }
+    }
+
+    const ws_id = mgr.create(name, null) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to create workspace");
+        return;
+    };
+
+    var buf: [64]u8 = undefined;
+    const num = std.fmt.bufPrint(&buf, "{d}", .{ws_id}) catch "0";
+    respondOkRaw(alloc, client_fd, id, num);
+}
+
+fn v2WorkspaceSelect(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+
+    const ws_id = getParamInt(params, "workspace_id") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing workspace_id");
+        return;
+    };
+
+    if (mgr.select(ws_id)) {
+        respondOkString(alloc, client_fd, id, "selected");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "workspace not found");
+    }
+}
+
+fn v2WorkspaceClose(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+
+    const ws_id = getParamInt(params, "workspace_id") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing workspace_id");
+        return;
+    };
+
+    if (mgr.close(ws_id)) {
+        respondOkString(alloc, client_fd, id, "closed");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "workspace not found");
+    }
+}
+
+fn v2WorkspaceRename(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+
+    const ws_id = getParamInt(params, "workspace_id") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing workspace_id");
+        return;
+    };
+
+    const title = getParamString(params, "title") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing title");
+        return;
+    };
+
+    if (mgr.rename(ws_id, title) catch false) {
+        respondOkString(alloc, client_fd, id, "renamed");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "workspace not found");
+    }
+}
+
+/// Extract an integer parameter from JSON params.
+fn getParamInt(params: ?std.json.Value, key: []const u8) ?u64 {
+    const p = params orelse return null;
+    if (p != .object) return null;
+    const v = p.object.get(key) orelse return null;
+    return switch (v) {
+        .integer => |n| @intCast(@max(0, n)),
+        else => null,
+    };
+}
+
+/// Extract a string parameter from JSON params.
+fn getParamString(params: ?std.json.Value, key: []const u8) ?[]const u8 {
+    const p = params orelse return null;
+    if (p != .object) return null;
+    const v = p.object.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 // --- Response helpers ---
