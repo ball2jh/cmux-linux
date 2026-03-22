@@ -1688,6 +1688,14 @@ pub const Surface = extern struct {
             return;
         };
 
+        // cmux: store notification in the notification store
+        if (comptime build_config.cmux) {
+            const notification_store = @import("../../../cmux/notification/store.zig");
+            if (notification_store.getGlobal()) |store| {
+                store.add(title, body, @intFromPtr(core_surface));
+            }
+        }
+
         const t = switch (title.len) {
             0 => "Ghostty",
             else => title,

@@ -10,10 +10,12 @@ const build_config = @import("../build_config.zig");
 
 pub const socket = @import("socket/server.zig");
 pub const handler_v1 = @import("socket/handler_v1.zig");
+pub const notification = @import("notification/store.zig");
 
 test {
     if (comptime build_config.cmux) {
         _ = socket;
         _ = handler_v1;
+        _ = notification;
     }
 }

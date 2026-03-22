@@ -17,7 +17,7 @@ const Server = @import("server.zig").Server;
 const Window = @import("../../apprt/gtk/class/window.zig").Window;
 const GtkSurface = @import("../../apprt/gtk/class/surface.zig").Surface;
 const CoreSurface = @import("../../Surface.zig");
-const termio = @import("../../termio.zig");
+const notification_store = @import("../notification/store.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -43,6 +43,13 @@ pub fn handleCommand(
         Server.respond(client_fd, "ok");
     } else if (std.mem.eql(u8, command, "send")) {
         cmdSend(app, alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "list-notifications")) {
+        cmdListNotifications(alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "clear-notifications")) {
+        cmdClearNotifications();
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, command, "notify")) {
+        cmdNotify(args, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -112,6 +119,52 @@ fn cmdSend(app: *gtk.Application, alloc: Allocator, text: []const u8, client_fd:
         return;
     };
 
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdListNotifications(alloc: Allocator, client_fd: posix.fd_t) void {
+    const store = notification_store.getGlobal() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const list = store.formatList(alloc) catch {
+        Server.respond(client_fd, "error: failed to format notifications");
+        return;
+    };
+    defer alloc.free(list);
+    if (list.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        // formatList already has newlines, send without extra newline
+        _ = posix.write(client_fd, list) catch {};
+    }
+}
+
+fn cmdClearNotifications() void {
+    const store = notification_store.getGlobal() orelse return;
+    store.clear(null);
+}
+
+fn cmdNotify(args: []const u8, client_fd: posix.fd_t) void {
+    // Format: notify <title> [body]
+    // Title and body are separated by first space
+    if (args.len == 0) {
+        Server.respond(client_fd, "error: notify requires a title");
+        return;
+    }
+
+    var title: []const u8 = args;
+    var body: []const u8 = "";
+    if (std.mem.indexOf(u8, args, " ")) |space_pos| {
+        title = args[0..space_pos];
+        body = std.mem.trim(u8, args[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
+    }
+
+    const store = notification_store.getGlobal() orelse {
+        Server.respond(client_fd, "error: notification store not initialized");
+        return;
+    };
+    store.add(title, body, 0); // surface_id 0 = manual notification
     Server.respond(client_fd, "ok");
 }
 

@@ -11,6 +11,7 @@ const gtk = @import("gtk");
 const build_config = @import("../../../build_config.zig");
 const cmux_socket = if (build_config.cmux) @import("../../../cmux/socket/server.zig") else struct {};
 const cmux_handler_v1 = if (build_config.cmux) @import("../../../cmux/socket/handler_v1.zig") else struct {};
+const cmux_notifications = if (build_config.cmux) @import("../../../cmux/notification/store.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -437,13 +438,14 @@ pub const Application = extern struct {
         const alloc = self.allocator();
         const priv: *Private = self.private();
 
-        // Shut down cmux socket server
+        // Shut down cmux socket server and notification store
         if (comptime build_config.cmux) {
             if (priv.cmux_server) |server| {
                 server.deinit();
                 alloc.destroy(server);
                 priv.cmux_server = null;
             }
+            cmux_notifications.deinitGlobal(alloc);
         }
 
         priv.config.unref();
@@ -1317,8 +1319,11 @@ pub const Application = extern struct {
         // Setup our global shortcuts
         self.startupGlobalShortcuts();
 
-        // Start cmux socket server for AI agent control
+        // Initialize cmux notification store and socket server
         if (comptime build_config.cmux) {
+            cmux_notifications.initGlobal(self.allocator()) catch |err| {
+                log.err("failed to init cmux notification store: {}", .{err});
+            };
             self.startupCmuxSocket();
         }
 
