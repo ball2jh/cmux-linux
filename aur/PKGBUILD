@@ -1,0 +1,81 @@
+# Maintainer: ball2jh <https://github.com/ball2jh>
+pkgname=cmux-git
+pkgver=r5.ba31c99
+pkgrel=1
+pkgdesc='Terminal for AI coding agents with socket control API, built on Ghostty'
+arch=('x86_64')
+url='https://github.com/ball2jh/cmux-linux'
+license=('AGPL-3.0-or-later' 'MIT')
+depends=(
+    'gtk4'
+    'libadwaita'
+    'gtk4-layer-shell'
+    'fontconfig'
+    'freetype2'
+    'harfbuzz'
+    'glib2'
+    'glibc'
+    'gcc-libs'
+    'hicolor-icon-theme'
+)
+makedepends=(
+    'git'
+    'zig>=0.15'
+    'pkgconf'
+    'blueprint-compiler>=0.16'
+)
+optdepends=(
+    'git: Git branch info in workspace sidebar'
+)
+provides=('cmux')
+conflicts=('cmux')
+source=("git+https://github.com/ball2jh/cmux-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd cmux-linux
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+    cd cmux-linux
+    zig build \
+        -Doptimize=ReleaseFast \
+        -Dcmux=true \
+        -Dversion-string="0.1.0-dev" \
+        -Dpie=true
+}
+
+check() {
+    cd cmux-linux
+    ./zig-out/bin/cmux --version
+}
+
+package() {
+    cd cmux-linux
+
+    # Binary
+    install -Dm755 zig-out/bin/cmux "$pkgdir/usr/bin/cmux"
+
+    # Terminfo — skip since ghostty terminfo is provided by ncurses/ghostty packages.
+    # cmux uses the same TERM=ghostty as upstream Ghostty.
+
+    # Shell integration
+    if [ -d zig-out/share/ghostty/shell-integration ]; then
+        install -dm755 "$pkgdir/usr/share/cmux/shell-integration"
+        cp -r zig-out/share/ghostty/shell-integration/* "$pkgdir/usr/share/cmux/shell-integration/"
+    fi
+
+    # Desktop file
+    for f in zig-out/share/applications/*.desktop; do
+        [ -f "$f" ] && install -Dm644 "$f" "$pkgdir/usr/share/applications/$(basename "$f")"
+    done
+
+    # Icons (if present)
+    if [ -d zig-out/share/icons ]; then
+        cp -r zig-out/share/icons "$pkgdir/usr/share/"
+    fi
+
+    # Licenses
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
