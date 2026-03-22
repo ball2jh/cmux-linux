@@ -183,23 +183,141 @@ label.resize-overlay {
 }
 
 /*
- * cmux workspace sidebar
+ * cmux workspace sidebar — matches macOS cmux appearance
+ * Accent: rgb(0, 145, 255) dark, rgb(0, 136, 255) light
  */
 .cmux-workspace-sidebar {
-  background-color: rgba(30, 30, 30, 0.95);
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: rgba(28, 28, 30, 0.97);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 200px;
 }
 
 .cmux-workspace-sidebar row {
-  padding: 4px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 8px 12px;
+  margin: 2px 6px;
+  border-radius: 8px;
+  transition: background-color 150ms ease;
+}
+
+.cmux-workspace-sidebar row:hover {
+  background-color: rgba(255, 255, 255, 0.06);
 }
 
 .cmux-workspace-sidebar row:selected {
-  background-color: rgba(80, 130, 220, 0.3);
+  background-color: rgba(0, 145, 255, 0.25);
 }
 
-.cmux-workspace-sidebar row label {
-  color: rgba(255, 255, 255, 0.85);
+.cmux-workspace-sidebar row:selected:hover {
+  background-color: rgba(0, 145, 255, 0.35);
+}
+
+/* Workspace name */
+.cmux-workspace-sidebar .cmux-ws-name {
+  color: rgba(255, 255, 255, 0.92);
   font-size: 13px;
+  font-weight: 600;
+}
+
+.cmux-workspace-sidebar row:selected .cmux-ws-name {
+  color: white;
+}
+
+/* Status/metadata below workspace name */
+.cmux-workspace-sidebar .cmux-ws-status {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.cmux-workspace-sidebar .cmux-ws-branch {
+  color: rgba(0, 145, 255, 0.8);
+  font-size: 11px;
+}
+
+/* Progress bar in sidebar */
+.cmux-sidebar-progress {
+  min-height: 3px;
+  border-radius: 2px;
+  margin-top: 4px;
+}
+
+.cmux-sidebar-progress trough {
+  background-color: rgba(255, 255, 255, 0.1);
+  min-height: 3px;
+  border-radius: 2px;
+}
+
+.cmux-sidebar-progress progress {
+  background-color: rgb(0, 145, 255);
+  min-height: 3px;
+  border-radius: 2px;
+}
+
+/*
+ * cmux notification badge (8px blue dot on tabs)
+ */
+.cmux-notification-badge {
+  background-color: rgb(0, 145, 255);
+  border-radius: 50%;
+  min-width: 8px;
+  min-height: 8px;
+  max-width: 8px;
+  max-height: 8px;
+}
+
+.cmux-notification-badge.read {
+  background-color: transparent;
+  border: 1.5px solid rgb(0, 145, 255);
+}
+
+/*
+ * cmux notification ring on focused surface
+ */
+.cmux-notification-ring {
+  border-color: rgba(0, 145, 255, 0.5);
+  border-width: 3px;
+  border-style: solid;
+  border-radius: 4px;
+}
+
+/*
+ * cmux notification panel
+ */
+.cmux-notification-row {
+  padding: 12px;
+  margin: 4px 8px;
+  border-radius: 10px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.cmux-notification-row:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.cmux-notification-title {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cmux-notification-body {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+.cmux-notification-time {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 11px;
+}
+
+.cmux-notification-unread-dot {
+  background-color: rgb(0, 145, 255);
+  border-radius: 50%;
+  min-width: 8px;
+  min-height: 8px;
+}
+
+.cmux-notification-empty {
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 14px;
+  padding: 24px;
 }

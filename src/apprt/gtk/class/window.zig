@@ -377,7 +377,7 @@ pub const Window = extern struct {
         const sidebar = gtk.ListBox.new();
         const sidebar_widget = sidebar.as(gtk.Widget);
         sidebar_widget.addCssClass("cmux-workspace-sidebar");
-        sidebar_widget.setSizeRequest(180, -1);
+        sidebar_widget.setSizeRequest(200, -1);
 
         // Add workspace entries from the workspace manager
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
@@ -386,21 +386,49 @@ pub const Window = extern struct {
             defer mgr.mutex.unlock();
 
             for (mgr.workspaces.items) |ws| {
-                const label = gtk.Label.new(@ptrCast(ws.name.ptr));
-                const label_widget = label.as(gtk.Widget);
-                label_widget.setHalign(.start);
-                label_widget.setMarginStart(12);
-                label_widget.setMarginEnd(12);
-                label_widget.setMarginTop(8);
-                label_widget.setMarginBottom(8);
-                sidebar.append(label_widget);
+                // Create a vertical box for each workspace row
+                const row_box = gtk.Box.new(.vertical, 2);
+                const row_widget = row_box.as(gtk.Widget);
+
+                // Workspace name
+                const name_label = gtk.Label.new(@ptrCast(ws.name.ptr));
+                const name_widget = name_label.as(gtk.Widget);
+                name_widget.addCssClass("cmux-ws-name");
+                name_widget.setHalign(.start);
+                row_box.append(name_widget);
+
+                // Status summary (if any status entries exist)
+                if (ws.status.statuses.items.len > 0) {
+                    const first_status = ws.status.statuses.items[0];
+                    var status_buf: [128]u8 = undefined;
+                    const status_text = std.fmt.bufPrintZ(&status_buf, "{s}: {s}", .{
+                        first_status.key, first_status.value,
+                    }) catch "...";
+                    const status_label = gtk.Label.new(status_text);
+                    const status_widget = status_label.as(gtk.Widget);
+                    status_widget.addCssClass("cmux-ws-status");
+                    status_widget.setHalign(.start);
+                    row_box.append(status_widget);
+                }
+
+                // Progress bar (if any)
+                if (ws.status.progress.items.len > 0) {
+                    const prog = ws.status.progress.items[0];
+                    const progress_bar = gtk.ProgressBar.new();
+                    progress_bar.setFraction(prog.value);
+                    const prog_widget = progress_bar.as(gtk.Widget);
+                    prog_widget.addCssClass("cmux-sidebar-progress");
+                    row_box.append(prog_widget);
+                }
+
+                sidebar.append(row_widget);
             }
         }
 
         // Create a scrolled window for the sidebar
         const scrolled = gtk.ScrolledWindow.new();
         scrolled.setChild(sidebar_widget);
-        scrolled.as(gtk.Widget).setSizeRequest(180, -1);
+        scrolled.as(gtk.Widget).setSizeRequest(200, -1);
         scrolled.setPolicy(.never, .automatic);
 
         // Create a paned: sidebar | content
@@ -408,14 +436,13 @@ pub const Window = extern struct {
         const paned_widget = paned.as(gtk.Widget);
         paned_widget.addCssClass("cmux-main-paned");
 
-        // We need to reparent toast_overlay from the parent box to our paned.
-        // First unparent it.
+        // Reparent toast_overlay from the parent box to our paned.
         toast_widget.unparent();
 
         // Set up the paned children
         paned.setStartChild(scrolled.as(gtk.Widget));
         paned.setEndChild(toast_widget);
-        paned.setPosition(180);
+        paned.setPosition(200);
         paned.setShrinkStartChild(0);
         paned.setResizeStartChild(0);
 
