@@ -28,7 +28,8 @@ pub fn run(alloc: Allocator) !u8 {
             .{commit_hash},
         );
     };
-    try stdout.print("Ghostty {s}\n\n", .{build_config.version_string});
+    const app_name = if (build_config.cmux) "cmux" else "Ghostty";
+    try stdout.print("{s} {s}\n\n", .{ app_name, build_config.version_string });
     if (tty) try stdout.print("\x1b]8;;\x1b\\", .{});
 
     try stdout.print("Version\n", .{});

@@ -265,23 +265,28 @@ fn addLinuxAppResources(
     // Background:
     // https://developer.gnome.org/documentation/guidelines/maintainer/integrating.html
 
-    const name = b.fmt("Ghostty{s}", .{
+    const base_name = if (cfg.cmux) "cmux" else "Ghostty";
+    const name = b.fmt("{s}{s}", .{
+        base_name,
         switch (cfg.optimize) {
             .Debug, .ReleaseSafe => " (Debug)",
             .ReleaseFast, .ReleaseSmall => "",
         },
     });
 
-    const app_id = b.fmt("com.mitchellh.ghostty{s}", .{
+    const app_id_prefix = if (cfg.cmux) "ai.manaflow.cmux" else "com.mitchellh.ghostty";
+    const app_id = b.fmt("{s}{s}", .{
+        app_id_prefix,
         switch (cfg.optimize) {
             .Debug, .ReleaseSafe => "-debug",
             .ReleaseFast, .ReleaseSmall => "",
         },
     });
 
+    const exe_name = if (cfg.cmux) "cmux" else "ghostty";
     const exe_abs_path = b.fmt(
-        "{s}/bin/ghostty",
-        .{b.install_prefix},
+        "{s}/bin/{s}",
+        .{ b.install_prefix, exe_name },
     );
 
     // The templates that we will process. The templates are in

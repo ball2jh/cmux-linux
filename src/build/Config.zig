@@ -35,6 +35,9 @@ simd: bool = true,
 i18n: bool = true,
 wasm_shared: bool = true,
 
+/// cmux mode: builds as cmux instead of ghostty
+cmux: bool = false,
+
 /// Ghostty exe properties
 exe_entrypoint: ExeEntrypoint = .ghostty,
 version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
@@ -202,6 +205,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         .linux, .freebsd => target.result.isGnuLibC(),
         else => false,
     };
+
+    config.cmux = b.option(
+        bool,
+        "cmux",
+        "Build as cmux (terminal for AI coding agents) instead of Ghostty.",
+    ) orelse false;
 
     //---------------------------------------------------------------
     // Ghostty Exe Properties
@@ -487,6 +496,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // support all types.
     step.addOption(bool, "flatpak", self.flatpak);
     step.addOption(bool, "snap", self.snap);
+    step.addOption(bool, "cmux", self.cmux);
     step.addOption(bool, "x11", self.x11);
     step.addOption(bool, "wayland", self.wayland);
     step.addOption(bool, "sentry", self.sentry);
@@ -571,6 +581,7 @@ pub fn fromOptions() Config {
         .font_backend = std.meta.stringToEnum(FontBackend, @tagName(options.font_backend)).?,
         .renderer = std.meta.stringToEnum(RendererBackend, @tagName(options.renderer)).?,
         .snap = options.snap,
+        .cmux = options.cmux,
         .exe_entrypoint = std.meta.stringToEnum(ExeEntrypoint, @tagName(options.exe_entrypoint)).?,
         .wasm_target = std.meta.stringToEnum(WasmTarget, @tagName(options.wasm_target)).?,
         .wasm_shared = options.wasm_shared,

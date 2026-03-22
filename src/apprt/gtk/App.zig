@@ -5,6 +5,7 @@ const App = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const build_config = @import("../../build_config.zig");
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const Config = configpkg.Config;
@@ -22,13 +23,23 @@ const log = std.log.scoped(.gtk);
 pub const must_draw_from_app_thread = true;
 
 /// GTK application ID
-pub const application_id = switch (builtin.mode) {
+pub const application_id = if (build_config.cmux)
+    switch (builtin.mode) {
+        .Debug, .ReleaseSafe => "ai.manaflow.cmux-debug",
+        .ReleaseFast, .ReleaseSmall => "ai.manaflow.cmux",
+    }
+else switch (builtin.mode) {
     .Debug, .ReleaseSafe => "com.mitchellh.ghostty-debug",
     .ReleaseFast, .ReleaseSmall => "com.mitchellh.ghostty",
 };
 
 /// GTK object path
-pub const object_path = switch (builtin.mode) {
+pub const object_path = if (build_config.cmux)
+    switch (builtin.mode) {
+        .Debug, .ReleaseSafe => "/ai/manaflow/cmux_debug",
+        .ReleaseFast, .ReleaseSmall => "/ai/manaflow/cmux",
+    }
+else switch (builtin.mode) {
     .Debug, .ReleaseSafe => "/com/mitchellh/ghostty_debug",
     .ReleaseFast, .ReleaseSmall => "/com/mitchellh/ghostty",
 };
