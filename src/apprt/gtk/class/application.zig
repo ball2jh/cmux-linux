@@ -14,6 +14,7 @@ const cmux_handler_v1 = if (build_config.cmux) @import("../../../cmux/socket/han
 const cmux_notifications = if (build_config.cmux) @import("../../../cmux/notification/store.zig") else struct {};
 const cmux_workspaces = if (build_config.cmux) @import("../../../cmux/workspace/manager.zig") else struct {};
 const cmux_session = if (build_config.cmux) @import("../../../cmux/session/persistence.zig") else struct {};
+const cmux_browser = if (build_config.cmux) @import("../../../cmux/browser/panel.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -450,6 +451,7 @@ pub const Application = extern struct {
             }
             cmux_notifications.deinitGlobal(alloc);
             cmux_workspaces.deinitGlobal(alloc);
+            cmux_browser.deinitGlobal();
         }
 
         priv.config.unref();
@@ -1331,6 +1333,7 @@ pub const Application = extern struct {
             cmux_workspaces.initGlobal(self.allocator()) catch |err| {
                 log.err("failed to init cmux workspace manager: {}", .{err});
             };
+            cmux_browser.initGlobal(self.allocator());
             // Restore previous session (workspaces) before starting
             _ = cmux_session.restore(self.allocator());
             self.startupCmuxSocket();

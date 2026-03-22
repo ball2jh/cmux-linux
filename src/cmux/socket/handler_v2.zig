@@ -16,6 +16,7 @@ const gtk = @import("gtk");
 const Server = @import("server.zig").Server;
 const handler_v1 = @import("handler_v1.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
+const browser_panel = @import("../browser/panel.zig");
 
 const log = std.log.scoped(.cmux_v2);
 
@@ -105,6 +106,14 @@ fn dispatch(
         v2WorkspaceClose(params, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.rename")) {
         v2WorkspaceRename(params, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.open")) {
+        v2BrowserOpen(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.navigate")) {
+        v2BrowserNavigate(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.url.get")) {
+        v2BrowserGetUrl(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.list")) {
+        v2BrowserList(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.list")) {
         v2ListNotifications(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.clear")) {
@@ -296,6 +305,47 @@ fn v2WorkspaceRename(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Va
     } else {
         respondError(alloc, client_fd, id, "not_found", "workspace not found");
     }
+}
+
+fn v2BrowserOpen(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const url = getParamString(params, "url") orelse "about:blank";
+    const panel_id = browser_panel.open(url) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to open browser");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    respondOkRaw(alloc, client_fd, id, std.fmt.bufPrint(&buf, "{d}", .{panel_id}) catch "0");
+}
+
+fn v2BrowserNavigate(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const url = getParamString(params, "url") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing url");
+        return;
+    };
+    const panel_id = getParamInt(params, "id") orelse 0;
+    browser_panel.navigateTo(@intCast(panel_id), url) catch {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+        return;
+    };
+    respondOkString(alloc, client_fd, id, "navigated");
+}
+
+fn v2BrowserGetUrl(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const panel_id = getParamInt(params, "id") orelse 0;
+    const url = browser_panel.getUrl(@intCast(panel_id)) orelse {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+        return;
+    };
+    respondOkString(alloc, client_fd, id, url);
+}
+
+fn v2BrowserList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const json_str = browser_panel.formatJson(alloc) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to list browsers");
+        return;
+    };
+    defer alloc.free(json_str);
+    respondOkRaw(alloc, client_fd, id, json_str);
 }
 
 /// Extract an integer parameter from JSON params.

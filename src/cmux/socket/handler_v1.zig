@@ -19,6 +19,7 @@ const GtkSurface = @import("../../apprt/gtk/class/surface.zig").Surface;
 const CoreSurface = @import("../../Surface.zig");
 const notification_store = @import("../notification/store.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
+const browser = @import("../browser/panel.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -65,6 +66,12 @@ pub fn handleCommand(
         cmdRenameWorkspace(alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "current-workspace")) {
         cmdCurrentWorkspace(client_fd);
+    } else if (std.mem.eql(u8, command, "open-browser")) {
+        cmdOpenBrowser(args, client_fd);
+    } else if (std.mem.eql(u8, command, "navigate")) {
+        cmdNavigate(args, client_fd);
+    } else if (std.mem.eql(u8, command, "get-url")) {
+        cmdGetUrl(args, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -308,6 +315,42 @@ fn cmdCurrentWorkspace(client_fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&buf, "{d}", .{mgr.activeId()}) catch "0";
     Server.respond(client_fd, resp);
+}
+
+fn cmdOpenBrowser(args: []const u8, client_fd: posix.fd_t) void {
+    const url = if (args.len > 0) args else "about:blank";
+    const id = browser.open(url) catch {
+        Server.respond(client_fd, "error: failed to open browser");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+}
+
+fn cmdNavigate(args: []const u8, client_fd: posix.fd_t) void {
+    // Format: navigate <id> <url>
+    const space = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: navigate <id> <url>");
+        return;
+    };
+    const id = std.fmt.parseInt(usize, args[0..space], 10) catch {
+        Server.respond(client_fd, "error: invalid browser id");
+        return;
+    };
+    const url = std.mem.trim(u8, args[space + 1 ..], &[_]u8{ ' ', '\t' });
+    browser.navigateTo(id, url) catch {
+        Server.respond(client_fd, "error: browser not found");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdGetUrl(args: []const u8, client_fd: posix.fd_t) void {
+    const id = std.fmt.parseInt(usize, args, 10) catch {
+        Server.respond(client_fd, "error: invalid browser id");
+        return;
+    };
+    Server.respond(client_fd, browser.getUrl(id) orelse "error: browser not found");
 }
 
 /// Get the active core Surface from the GTK Application.
