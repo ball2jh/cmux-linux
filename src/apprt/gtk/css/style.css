@@ -181,3 +181,25 @@ label.resize-overlay {
   margin: 0;
   padding: 0;
 }
+
+/*
+ * cmux workspace sidebar
+ */
+.cmux-workspace-sidebar {
+  background-color: rgba(30, 30, 30, 0.95);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.cmux-workspace-sidebar row {
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cmux-workspace-sidebar row:selected {
+  background-color: rgba(80, 130, 220, 0.3);
+}
+
+.cmux-workspace-sidebar row label {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+}

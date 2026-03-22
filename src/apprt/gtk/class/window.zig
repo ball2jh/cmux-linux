@@ -323,6 +323,11 @@ pub const Window = extern struct {
         // in initTemplate.
         self.syncAppearance();
 
+        // cmux: Initialize workspace sidebar
+        if (comptime build_config.cmux) {
+            self.initWorkspaceSidebar();
+        }
+
         // We need to do this so that the title initializes properly,
         // I think because its a dynamic getter.
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);
@@ -357,6 +362,68 @@ pub const Window = extern struct {
         };
 
         ext.actions.add(Self, self, &actions);
+    }
+
+    /// cmux: Initialize the workspace sidebar.
+    /// Wraps the toast_overlay in a gtk.Paned with a sidebar on the left.
+    fn initWorkspaceSidebar(self: *Self) void {
+        if (comptime !build_config.cmux) return;
+
+        const priv = self.private();
+        const toast_widget = priv.toast_overlay.as(gtk.Widget);
+        const parent_widget = toast_widget.getParent() orelse return;
+
+        // Create the sidebar list box
+        const sidebar = gtk.ListBox.new();
+        const sidebar_widget = sidebar.as(gtk.Widget);
+        sidebar_widget.addCssClass("cmux-workspace-sidebar");
+        sidebar_widget.setSizeRequest(180, -1);
+
+        // Add workspace entries from the workspace manager
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        if (cmux_ws.getGlobal()) |mgr| {
+            mgr.mutex.lock();
+            defer mgr.mutex.unlock();
+
+            for (mgr.workspaces.items) |ws| {
+                const label = gtk.Label.new(@ptrCast(ws.name.ptr));
+                const label_widget = label.as(gtk.Widget);
+                label_widget.setHalign(.start);
+                label_widget.setMarginStart(12);
+                label_widget.setMarginEnd(12);
+                label_widget.setMarginTop(8);
+                label_widget.setMarginBottom(8);
+                sidebar.append(label_widget);
+            }
+        }
+
+        // Create a scrolled window for the sidebar
+        const scrolled = gtk.ScrolledWindow.new();
+        scrolled.setChild(sidebar_widget);
+        scrolled.as(gtk.Widget).setSizeRequest(180, -1);
+        scrolled.setPolicy(.never, .automatic);
+
+        // Create a paned: sidebar | content
+        const paned = gtk.Paned.new(.horizontal);
+        const paned_widget = paned.as(gtk.Widget);
+        paned_widget.addCssClass("cmux-main-paned");
+
+        // We need to reparent toast_overlay from the parent box to our paned.
+        // First unparent it.
+        toast_widget.unparent();
+
+        // Set up the paned children
+        paned.setStartChild(scrolled.as(gtk.Widget));
+        paned.setEndChild(toast_widget);
+        paned.setPosition(180);
+        paned.setShrinkStartChild(0);
+        paned.setResizeStartChild(0);
+
+        // Add paned to the parent box where toast_overlay was
+        const parent_box: *gtk.Box = @ptrCast(@alignCast(parent_widget));
+        parent_box.append(paned_widget);
+
+        log.info("cmux workspace sidebar initialized", .{});
     }
 
     /// Winproto backend for this window.
