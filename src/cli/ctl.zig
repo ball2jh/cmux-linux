@@ -150,6 +150,7 @@ fn printUsage() void {
         \\  new-window     Open a new window
         \\  list-windows   List open window IDs
         \\  close-window   Close the active window
+        \\  send <text>    Send text to the active terminal
         \\  quit           Quit cmux
         \\
     , .{});
