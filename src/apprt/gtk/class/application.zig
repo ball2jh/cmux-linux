@@ -9,6 +9,7 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const build_config = @import("../../../build_config.zig");
+const cmux_socket = if (build_config.cmux) @import("../../../cmux/socket/server.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -212,6 +213,11 @@ pub const Application = extern struct {
         /// by the system. If this is null, the LANG environment variable did
         /// not exist in Ghostty's environment variable.
         saved_language: ?[:0]const u8 = null,
+
+        /// cmux socket server for AI agent control API (heap-allocated
+        /// so GLib callbacks always have a stable pointer).
+        cmux_server: if (build_config.cmux) ?*cmux_socket.Server else void =
+            if (build_config.cmux) null else {},
 
         pub var offset: c_int = 0;
     };
@@ -429,6 +435,16 @@ pub const Application = extern struct {
     pub fn deinit(self: *Self) void {
         const alloc = self.allocator();
         const priv: *Private = self.private();
+
+        // Shut down cmux socket server
+        if (comptime build_config.cmux) {
+            if (priv.cmux_server) |server| {
+                server.deinit();
+                alloc.destroy(server);
+                priv.cmux_server = null;
+            }
+        }
+
         priv.config.unref();
         priv.winproto.deinit(alloc);
         priv.global_shortcuts.unref();
@@ -1300,6 +1316,11 @@ pub const Application = extern struct {
         // Setup our global shortcuts
         self.startupGlobalShortcuts();
 
+        // Start cmux socket server for AI agent control
+        if (comptime build_config.cmux) {
+            self.startupCmuxSocket();
+        }
+
         // If we have any config diagnostics from loading, then we
         // show the diagnostics dialog. We show this one as a general
         // modal (not to any specific window) because we don't even
@@ -1431,6 +1452,33 @@ pub const Application = extern struct {
             self,
             .{},
         );
+    }
+
+    /// Start the cmux socket server for AI agent control.
+    fn startupCmuxSocket(self: *Self) void {
+        if (comptime !build_config.cmux) return;
+
+        const priv = self.private();
+        const alloc = self.allocator();
+
+        const server = alloc.create(cmux_socket.Server) catch |err| {
+            log.err("failed to alloc cmux socket server: {}", .{err});
+            return;
+        };
+        server.* = cmux_socket.Server.init(alloc, &cmux_socket.handleV1Command) catch |err| {
+            log.err("failed to init cmux socket server: {}", .{err});
+            alloc.destroy(server);
+            return;
+        };
+
+        server.start() catch |err| {
+            log.err("failed to start cmux socket server: {}", .{err});
+            server.deinit();
+            alloc.destroy(server);
+            return;
+        };
+
+        priv.cmux_server = server;
     }
 
     fn activate(self: *Self) callconv(.c) void {
