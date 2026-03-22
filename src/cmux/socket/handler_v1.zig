@@ -20,6 +20,7 @@ const CoreSurface = @import("../../Surface.zig");
 const notification_store = @import("../notification/store.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
 const browser = @import("../browser/panel.zig");
+const WorkspaceStatus = @import("../workspace/status.zig").WorkspaceStatus;
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -66,6 +67,22 @@ pub fn handleCommand(
         cmdRenameWorkspace(alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "current-workspace")) {
         cmdCurrentWorkspace(client_fd);
+    } else if (std.mem.eql(u8, command, "set-status")) {
+        cmdSetStatus(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "list-status")) {
+        cmdListStatus(alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "clear-status")) {
+        cmdClearStatus(args, client_fd);
+    } else if (std.mem.eql(u8, command, "set-progress")) {
+        cmdSetProgress(args, client_fd);
+    } else if (std.mem.eql(u8, command, "clear-progress")) {
+        cmdClearProgress(args, client_fd);
+    } else if (std.mem.eql(u8, command, "log")) {
+        cmdLog(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "clear-log")) {
+        cmdClearLog(client_fd);
+    } else if (std.mem.eql(u8, command, "list-log")) {
+        cmdListLog(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "open-browser")) {
         cmdOpenBrowser(args, client_fd);
     } else if (std.mem.eql(u8, command, "navigate")) {
@@ -315,6 +332,140 @@ fn cmdCurrentWorkspace(client_fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&buf, "{d}", .{mgr.activeId()}) catch "0";
     Server.respond(client_fd, resp);
+}
+
+// --- Status/Progress/Log commands ---
+
+fn getActiveWsStatus() ?*WorkspaceStatus {
+    const mgr = workspace_mgr.getGlobal() orelse return null;
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+    return mgr.getActiveStatus();
+}
+
+fn cmdSetStatus(_: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    // Format: set-status <key> <value>
+    const space = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: set-status <key> <value>");
+        return;
+    };
+    const key = args[0..space];
+    const value = std.mem.trim(u8, args[space + 1 ..], &[_]u8{ ' ', '\t' });
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "error: no active workspace");
+        return;
+    };
+    status.setStatus(key, value) catch {
+        Server.respond(client_fd, "error: failed to set status");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdListStatus(alloc: Allocator, client_fd: posix.fd_t) void {
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const text = status.formatStatusText(alloc) catch {
+        Server.respond(client_fd, "error: failed to format status");
+        return;
+    };
+    defer alloc.free(text);
+    if (text.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        _ = posix.write(client_fd, text) catch {};
+    }
+}
+
+fn cmdClearStatus(args: []const u8, client_fd: posix.fd_t) void {
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "ok");
+        return;
+    };
+    if (args.len > 0) {
+        status.clearStatus(args);
+    } else {
+        status.clearAllStatuses();
+    }
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdSetProgress(args: []const u8, client_fd: posix.fd_t) void {
+    // Format: set-progress <key> <value 0-100>
+    const space = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: set-progress <key> <percent>");
+        return;
+    };
+    const key = args[0..space];
+    const pct_str = std.mem.trim(u8, args[space + 1 ..], &[_]u8{ ' ', '\t' });
+    const pct = std.fmt.parseFloat(f64, pct_str) catch {
+        Server.respond(client_fd, "error: invalid percentage");
+        return;
+    };
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "error: no active workspace");
+        return;
+    };
+    status.setProgress(key, pct / 100.0) catch {
+        Server.respond(client_fd, "error: failed to set progress");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdClearProgress(args: []const u8, client_fd: posix.fd_t) void {
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "ok");
+        return;
+    };
+    if (args.len > 0) {
+        status.clearProgress(args);
+    }
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdLog(_: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    if (args.len == 0) {
+        Server.respond(client_fd, "error: usage: log <message>");
+        return;
+    }
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "error: no active workspace");
+        return;
+    };
+    status.addLog(args) catch {
+        Server.respond(client_fd, "error: failed to add log");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdClearLog(client_fd: posix.fd_t) void {
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "ok");
+        return;
+    };
+    status.clearLogs();
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdListLog(alloc: Allocator, client_fd: posix.fd_t) void {
+    const status = getActiveWsStatus() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const text = status.formatLogText(alloc) catch {
+        Server.respond(client_fd, "error: failed to format log");
+        return;
+    };
+    defer alloc.free(text);
+    if (text.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        _ = posix.write(client_fd, text) catch {};
+    }
 }
 
 fn cmdOpenBrowser(args: []const u8, client_fd: posix.fd_t) void {

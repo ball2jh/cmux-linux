@@ -11,6 +11,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const WorkspaceStatus = @import("status.zig").WorkspaceStatus;
+
 const log = std.log.scoped(.cmux_workspace);
 
 /// A single workspace.
@@ -19,6 +21,7 @@ pub const Workspace = struct {
     name: []const u8,
     cwd: ?[]const u8 = null,
     created_at: i64,
+    status: WorkspaceStatus,
 };
 
 /// Workspace manager.
@@ -37,6 +40,7 @@ pub const Manager = struct {
         for (self.workspaces.items) |*ws| {
             self.alloc.free(ws.name);
             if (ws.cwd) |cwd| self.alloc.free(cwd);
+            ws.status.deinit();
         }
         self.workspaces.deinit(self.alloc);
     }
@@ -60,6 +64,7 @@ pub const Manager = struct {
             .name = name_copy,
             .cwd = cwd_copy,
             .created_at = std.time.timestamp(),
+            .status = WorkspaceStatus.init(self.alloc),
         });
 
         // If this is the first workspace, make it active
@@ -118,6 +123,7 @@ pub const Manager = struct {
             if (ws.id == id) {
                 self.alloc.free(ws.name);
                 if (ws.cwd) |cwd| self.alloc.free(cwd);
+                ws.status.deinit();
                 _ = self.workspaces.orderedRemove(i);
 
                 // If we closed the active workspace, switch to the first one
@@ -131,6 +137,19 @@ pub const Manager = struct {
             }
         }
         return false;
+    }
+
+    /// Get the status store for a workspace (must hold mutex or call with lock).
+    pub fn getStatus(self: *Manager, id: u64) ?*WorkspaceStatus {
+        for (self.workspaces.items) |*ws| {
+            if (ws.id == id) return &ws.status;
+        }
+        return null;
+    }
+
+    /// Get the active workspace's status.
+    pub fn getActiveStatus(self: *Manager) ?*WorkspaceStatus {
+        return self.getStatus(self.active_id);
     }
 
     /// Format workspace list as JSON for the socket API.
