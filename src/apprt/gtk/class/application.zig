@@ -13,6 +13,7 @@ const cmux_socket = if (build_config.cmux) @import("../../../cmux/socket/server.
 const cmux_handler_v1 = if (build_config.cmux) @import("../../../cmux/socket/handler_v1.zig") else struct {};
 const cmux_notifications = if (build_config.cmux) @import("../../../cmux/notification/store.zig") else struct {};
 const cmux_workspaces = if (build_config.cmux) @import("../../../cmux/workspace/manager.zig") else struct {};
+const cmux_session = if (build_config.cmux) @import("../../../cmux/session/persistence.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -439,8 +440,9 @@ pub const Application = extern struct {
         const alloc = self.allocator();
         const priv: *Private = self.private();
 
-        // Shut down cmux socket server and notification store
+        // Shut down cmux session, socket server, and stores
         if (comptime build_config.cmux) {
+            cmux_session.stopAutosave();
             if (priv.cmux_server) |server| {
                 server.deinit();
                 alloc.destroy(server);
@@ -1329,7 +1331,11 @@ pub const Application = extern struct {
             cmux_workspaces.initGlobal(self.allocator()) catch |err| {
                 log.err("failed to init cmux workspace manager: {}", .{err});
             };
+            // Restore previous session (workspaces) before starting
+            _ = cmux_session.restore(self.allocator());
             self.startupCmuxSocket();
+            // Start session autosave
+            cmux_session.startAutosave(self.allocator(), self.as(gtk.Application));
         }
 
         // If we have any config diagnostics from loading, then we

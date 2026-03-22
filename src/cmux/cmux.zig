@@ -13,6 +13,7 @@ pub const handler_v1 = @import("socket/handler_v1.zig");
 pub const handler_v2 = @import("socket/handler_v2.zig");
 pub const notification = @import("notification/store.zig");
 pub const workspace = @import("workspace/manager.zig");
+pub const session = @import("session/persistence.zig");
 
 test {
     if (comptime build_config.cmux) {
