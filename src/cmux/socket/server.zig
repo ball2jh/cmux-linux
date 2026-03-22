@@ -16,6 +16,7 @@ const gio = @import("gio");
 const gtk = @import("gtk");
 
 const handler_v2 = @import("handler_v2.zig");
+const auth = @import("auth.zig");
 
 const log = std.log.scoped(.cmux_socket);
 
@@ -160,6 +161,14 @@ pub const Server = struct {
             log.warn("accept failed: {}", .{err});
             return 1;
         };
+
+        // Check authentication
+        if (!auth.checkClient(client_fd)) {
+            log.warn("auth rejected client connection", .{});
+            _ = posix.write(client_fd, "error: unauthorized\n") catch {};
+            posix.close(client_fd);
+            return 1;
+        }
 
         if (self.clients.items.len >= max_clients) {
             log.warn("max clients reached, rejecting connection", .{});

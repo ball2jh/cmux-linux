@@ -1,0 +1,36 @@
+name: cmux CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            git zig pkgconf blueprint-compiler \
+            gtk4 libadwaita gtk4-layer-shell \
+            fontconfig freetype2 harfbuzz glib2
+
+      - uses: actions/checkout@v4
+
+      - name: Build cmux
+        run: zig build -Dcmux=true -Dversion-string="0.0.0-ci" -Dpie=true
+
+      - name: Verify binary
+        run: |
+          ./zig-out/bin/cmux --version
+          echo "Build successful"
+
+      - name: Test CLI help
+        run: |
+          ./zig-out/bin/cmux +ctl 2>&1 || true

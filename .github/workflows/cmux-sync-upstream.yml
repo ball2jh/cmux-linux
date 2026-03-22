@@ -1,0 +1,61 @@
+name: Sync upstream (manaflow)
+
+on:
+  schedule:
+    # Weekly on Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add manaflow remote
+        run: |
+          git remote add manaflow https://github.com/manaflow-ai/ghostty.git || true
+          git fetch manaflow main
+
+      - name: Attempt merge
+        id: merge
+        run: |
+          git checkout -b sync/manaflow-$(date +%Y%m%d)
+          if git merge manaflow/main --no-edit; then
+            echo "status=clean" >> $GITHUB_OUTPUT
+          else
+            git merge --abort
+            echo "status=conflict" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR (clean merge)
+        if: steps.merge.outputs.status == 'clean'
+        run: |
+          git push origin sync/manaflow-$(date +%Y%m%d)
+          gh pr create \
+            --title "Sync upstream manaflow/ghostty $(date +%Y-%m-%d)" \
+            --body "Automated weekly sync from manaflow-ai/ghostty." \
+            --base main \
+            --head sync/manaflow-$(date +%Y%m%d)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create issue (conflicts)
+        if: steps.merge.outputs.status == 'conflict'
+        run: |
+          gh issue create \
+            --title "Upstream sync conflict $(date +%Y-%m-%d)" \
+            --body "Automated sync from manaflow-ai/ghostty has merge conflicts. Manual resolution required."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
