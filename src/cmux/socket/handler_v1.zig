@@ -21,6 +21,7 @@ const notification_store = @import("../notification/store.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
 const browser = @import("../browser/panel.zig");
 const WorkspaceStatus = @import("../workspace/status.zig").WorkspaceStatus;
+const Binding = @import("../../input/Binding.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -67,6 +68,16 @@ pub fn handleCommand(
         cmdRenameWorkspace(alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "current-workspace")) {
         cmdCurrentWorkspace(client_fd);
+    } else if (std.mem.eql(u8, command, "new-split")) {
+        cmdNewSplit(app, args, client_fd);
+    } else if (std.mem.eql(u8, command, "list-panes")) {
+        cmdListPanes(app, alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "send-key")) {
+        cmdSendKey(app, args, client_fd);
+    } else if (std.mem.eql(u8, command, "current-window")) {
+        cmdCurrentWindow(app, client_fd);
+    } else if (std.mem.eql(u8, command, "focus-window")) {
+        cmdFocusWindow(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "set-status")) {
         cmdSetStatus(alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "list-status")) {
@@ -332,6 +343,139 @@ fn cmdCurrentWorkspace(client_fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&buf, "{d}", .{mgr.activeId()}) catch "0";
     Server.respond(client_fd, resp);
+}
+
+// --- Pane/Split commands ---
+
+fn cmdNewSplit(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "error: no active surface");
+        return;
+    };
+
+    // Parse direction: right (default), left, up, down
+    const direction: Binding.Action.SplitDirection = if (args.len == 0)
+        .right
+    else if (std.mem.eql(u8, args, "right"))
+        .right
+    else if (std.mem.eql(u8, args, "left"))
+        .left
+    else if (std.mem.eql(u8, args, "up"))
+        .up
+    else if (std.mem.eql(u8, args, "down"))
+        .down
+    else {
+        Server.respond(client_fd, "error: direction must be right, left, up, or down");
+        return;
+    };
+
+    _ = surface.performBindingAction(.{ .new_split = direction }) catch {
+        Server.respond(client_fd, "error: failed to create split");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdListPanes(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+    // List all surfaces in the active window's tab
+    const active_gtk_window = app.getActiveWindow() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+
+    // Get all tabs and their surfaces
+    const tab_view = window.getTabView();
+    const n_pages = tab_view.getNPages();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    var i: c_int = 0;
+    while (i < n_pages) : (i += 1) {
+        const page = tab_view.getNthPage(i);
+        if (i > 0) writer.writeAll("\n") catch return;
+        writer.print("tab:{d} page:{d}", .{ i, @intFromPtr(page) }) catch return;
+    }
+
+    if (buf.items.len > 0) {
+        _ = posix.write(client_fd, buf.items) catch {};
+        _ = posix.write(client_fd, "\n") catch {};
+    } else {
+        Server.respond(client_fd, "");
+    }
+}
+
+fn cmdSendKey(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    if (args.len == 0) {
+        Server.respond(client_fd, "error: no key specified");
+        return;
+    }
+
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "error: no active surface");
+        return;
+    };
+
+    // Handle common key names
+    const text: []const u8 = if (std.mem.eql(u8, args, "enter") or std.mem.eql(u8, args, "return"))
+        "\r"
+    else if (std.mem.eql(u8, args, "tab"))
+        "\t"
+    else if (std.mem.eql(u8, args, "escape") or std.mem.eql(u8, args, "esc"))
+        "\x1b"
+    else if (std.mem.eql(u8, args, "backspace"))
+        "\x7f"
+    else if (std.mem.eql(u8, args, "space"))
+        " "
+    else if (std.mem.eql(u8, args, "ctrl-c"))
+        "\x03"
+    else if (std.mem.eql(u8, args, "ctrl-d"))
+        "\x04"
+    else if (std.mem.eql(u8, args, "ctrl-z"))
+        "\x1a"
+    else if (std.mem.eql(u8, args, "ctrl-l"))
+        "\x0c"
+    else if (std.mem.eql(u8, args, "up"))
+        "\x1b[A"
+    else if (std.mem.eql(u8, args, "down"))
+        "\x1b[B"
+    else if (std.mem.eql(u8, args, "right"))
+        "\x1b[C"
+    else if (std.mem.eql(u8, args, "left"))
+        "\x1b[D"
+    else
+        args;
+
+    surface.textCallback(text) catch {
+        Server.respond(client_fd, "error: send-key failed");
+        return;
+    };
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdCurrentWindow(app: *gtk.Application, client_fd: posix.fd_t) void {
+    if (app.getActiveWindow()) |win| {
+        var buf: [64]u8 = undefined;
+        Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{@intFromPtr(win)}) catch "0");
+    } else {
+        Server.respond(client_fd, "error: no active window");
+    }
+}
+
+fn cmdFocusWindow(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    _ = args; // TODO: parse window ID and focus specific window
+    if (app.getActiveWindow()) |win| {
+        win.present();
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: no window to focus");
+    }
 }
 
 // --- Status/Progress/Log commands ---

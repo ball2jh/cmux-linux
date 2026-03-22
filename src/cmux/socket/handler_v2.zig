@@ -88,10 +88,14 @@ fn dispatch(
         handler_v1.handleCommand(@ptrCast(app), alloc, "new-window", "", client_fd);
         // Override the V1 response with JSON
         respondOkString(alloc, client_fd, id, "created");
+    } else if (std.mem.eql(u8, method, "surface.split")) {
+        v2SurfaceSplit(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.send_text")) {
-        // Delegate to V1 send handler but we need the text from params
-        // For now, respond with guidance
-        respondError(alloc, client_fd, id, "not_implemented", "use V1 'send' command for now");
+        v2SurfaceSendText(app, alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "surface.send_key")) {
+        v2SurfaceSendKey(app, alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "pane.list")) {
+        v2PaneList(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.read_text")) {
         v2ReadScreen(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.list")) {
@@ -198,6 +202,71 @@ fn v2ListNotifications(alloc: Allocator, id: ?std.json.Value, client_fd: posix.f
     writer.writeAll("]") catch return;
 
     respondOkRaw(alloc, client_fd, id, buf.items);
+}
+
+fn v2SurfaceSplit(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const surface = handler_v1.getActiveSurface(app) orelse {
+        respondError(alloc, client_fd, id, "no_surface", "no active surface");
+        return;
+    };
+
+    const dir_str = getParamString(params, "direction") orelse "right";
+    const Binding = @import("../../input/Binding.zig");
+    const direction: Binding.Action.SplitDirection = if (std.mem.eql(u8, dir_str, "right"))
+        .right
+    else if (std.mem.eql(u8, dir_str, "left"))
+        .left
+    else if (std.mem.eql(u8, dir_str, "up"))
+        .up
+    else if (std.mem.eql(u8, dir_str, "down"))
+        .down
+    else {
+        respondError(alloc, client_fd, id, "invalid_params", "direction must be right/left/up/down");
+        return;
+    };
+
+    _ = surface.performBindingAction(.{ .new_split = direction }) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to create split");
+        return;
+    };
+    respondOkString(alloc, client_fd, id, "split_created");
+}
+
+fn v2SurfaceSendText(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const text = getParamString(params, "text") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing text");
+        return;
+    };
+
+    const surface = handler_v1.getActiveSurface(app) orelse {
+        respondError(alloc, client_fd, id, "no_surface", "no active surface");
+        return;
+    };
+
+    surface.textCallback(text) catch {
+        respondError(alloc, client_fd, id, "internal", "send failed");
+        return;
+    };
+    respondOkString(alloc, client_fd, id, "sent");
+}
+
+fn v2SurfaceSendKey(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const key_name = getParamString(params, "key") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing key");
+        return;
+    };
+
+    // Delegate to V1 send-key handler logic
+    handler_v1.handleCommand(@ptrCast(app), alloc, "send-key", key_name, client_fd);
+    // V1 already responded, but we need JSON. For now this works since
+    // the client can handle either format.
+    // TODO: proper JSON response wrapping
+}
+
+fn v2PaneList(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    // Delegate to V1 for now
+    handler_v1.handleCommand(@ptrCast(app), alloc, "list-panes", "", client_fd);
+    _ = id; // TODO: wrap in JSON
 }
 
 fn v2WorkspaceList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
