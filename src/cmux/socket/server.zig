@@ -12,6 +12,8 @@ const std = @import("std");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const glib = @import("glib");
+const gio = @import("gio");
+const gtk = @import("gtk");
 
 const log = std.log.scoped(.cmux_socket);
 
@@ -36,8 +38,14 @@ const Client = struct {
 /// The socket server state.
 pub const Server = struct {
     /// Callback type for dispatching parsed commands.
-    /// Returns the response string to send back to the client.
-    pub const CommandHandler = *const fn (command: []const u8, args: []const u8) []const u8;
+    /// The handler writes the response directly to the client fd.
+    pub const CommandHandler = *const fn (
+        ctx: *anyopaque,
+        alloc: Allocator,
+        command: []const u8,
+        args: []const u8,
+        client_fd: posix.fd_t,
+    ) void;
 
     alloc: Allocator,
     socket_path: []const u8,
@@ -45,8 +53,13 @@ pub const Server = struct {
     listen_watch_id: c_uint = 0,
     clients: std.ArrayListUnmanaged(Client) = .empty,
     handler: CommandHandler,
+    handler_ctx: *anyopaque,
 
-    pub fn init(alloc: Allocator, handler: CommandHandler) !Server {
+    pub fn init(
+        alloc: Allocator,
+        handler: CommandHandler,
+        handler_ctx: *anyopaque,
+    ) !Server {
         const uid = std.os.linux.getuid();
         const path = try std.fmt.allocPrint(alloc, "/tmp/cmux-{d}.sock", .{uid});
 
@@ -54,6 +67,7 @@ pub const Server = struct {
             .alloc = alloc,
             .socket_path = path,
             .handler = handler,
+            .handler_ctx = handler_ctx,
         };
     }
 
@@ -137,12 +151,12 @@ pub const Server = struct {
 
         if (condition.hup) {
             log.warn("listen socket hung up", .{});
-            return 0; // Remove watch
+            return 0;
         }
 
         const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC) catch |err| {
             log.warn("accept failed: {}", .{err});
-            return 1; // Keep watch
+            return 1;
         };
 
         if (self.clients.items.len >= max_clients) {
@@ -170,7 +184,7 @@ pub const Server = struct {
         };
 
         log.debug("accepted client connection (fd={})", .{client_fd});
-        return 1; // Keep watch
+        return 1;
     }
 
     /// GLib callback for data from a client.
@@ -184,12 +198,11 @@ pub const Server = struct {
 
         if (condition.hup) {
             self.removeClient(client_fd);
-            return 0; // Remove watch
+            return 0;
         }
 
-        // Find the client
         const client = self.findClient(client_fd) orelse {
-            return 0; // Remove watch if client not found
+            return 0;
         };
 
         // Read available data
@@ -201,30 +214,26 @@ pub const Server = struct {
         };
 
         if (n == 0) {
-            // EOF
             self.removeClient(client_fd);
             return 0;
         }
 
-        // Append to client buffer
         client.buf.appendSlice(self.alloc, buf[0..n]) catch {
             log.warn("client buffer overflow, dropping connection", .{});
             self.removeClient(client_fd);
             return 0;
         };
 
-        // Process complete lines
         self.processClientBuffer(client) catch {
             self.removeClient(client_fd);
             return 0;
         };
 
-        return 1; // Keep watch
+        return 1;
     }
 
     fn processClientBuffer(self: *Server, client: *Client) !void {
         while (true) {
-            // Find newline in buffer
             const newline_pos = std.mem.indexOf(u8, client.buf.items, "\n") orelse break;
 
             if (newline_pos > max_line_len) {
@@ -235,7 +244,6 @@ pub const Server = struct {
             const trimmed = std.mem.trim(u8, line, &[_]u8{ '\r', ' ', '\t' });
 
             if (trimmed.len > 0) {
-                // Parse command and args
                 var command: []const u8 = trimmed;
                 var args: []const u8 = "";
                 if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
@@ -243,12 +251,8 @@ pub const Server = struct {
                     args = std.mem.trim(u8, trimmed[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
                 }
 
-                // Dispatch to handler
-                const response = self.handler(command, args);
-
-                // Send response with newline
-                _ = posix.write(client.fd, response) catch {};
-                _ = posix.write(client.fd, "\n") catch {};
+                // Dispatch to handler (handler writes response directly)
+                self.handler(self.handler_ctx, self.alloc, command, args, client.fd);
             }
 
             // Remove processed data from buffer
@@ -277,15 +281,10 @@ pub const Server = struct {
             }
         }
     }
-};
 
-/// Default V1 command handler.
-pub fn handleV1Command(command: []const u8, _: []const u8) []const u8 {
-    if (std.mem.eql(u8, command, "ping")) {
-        return "pong";
+    /// Write a response line to a client fd.
+    pub fn respond(fd: posix.fd_t, msg: []const u8) void {
+        _ = posix.write(fd, msg) catch {};
+        _ = posix.write(fd, "\n") catch {};
     }
-    // TODO: implement remaining V1 commands:
-    // new-window, close-window, list-windows, send, send-key, etc.
-    // These need access to the GTK Application to dispatch actions.
-    return "error: unknown command";
-}
+};

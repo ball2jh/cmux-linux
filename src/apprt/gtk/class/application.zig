@@ -10,6 +10,7 @@ const gtk = @import("gtk");
 
 const build_config = @import("../../../build_config.zig");
 const cmux_socket = if (build_config.cmux) @import("../../../cmux/socket/server.zig") else struct {};
+const cmux_handler_v1 = if (build_config.cmux) @import("../../../cmux/socket/handler_v1.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -1465,7 +1466,11 @@ pub const Application = extern struct {
             log.err("failed to alloc cmux socket server: {}", .{err});
             return;
         };
-        server.* = cmux_socket.Server.init(alloc, &cmux_socket.handleV1Command) catch |err| {
+        server.* = cmux_socket.Server.init(
+            alloc,
+            &cmux_handler_v1.handleCommand,
+            @ptrCast(self.as(gtk.Application)),
+        ) catch |err| {
             log.err("failed to init cmux socket server: {}", .{err});
             alloc.destroy(server);
             return;
