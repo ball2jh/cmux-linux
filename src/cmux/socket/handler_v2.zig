@@ -127,6 +127,10 @@ fn dispatch(
         v2BrowserGetUrl(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.list")) {
         v2BrowserList(alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "notification.create")) {
+        v2NotificationCreate(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "notification.unread_count")) {
+        v2NotificationUnreadCount(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.list")) {
         v2ListNotifications(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.clear")) {
@@ -392,6 +396,31 @@ fn v2WorkspaceRename(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Va
     } else {
         respondError(alloc, client_fd, id, "not_found", "workspace not found");
     }
+}
+
+fn v2NotificationCreate(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const notification_store = @import("../notification/store.zig");
+    const title = getParamString(params, "title") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing title");
+        return;
+    };
+    const body = getParamString(params, "body") orelse "";
+    const store = notification_store.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "notification store not initialized");
+        return;
+    };
+    store.add(title, body, 0);
+    respondOkString(alloc, client_fd, id, "created");
+}
+
+fn v2NotificationUnreadCount(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const notification_store = @import("../notification/store.zig");
+    const store = notification_store.getGlobal() orelse {
+        respondOkRaw(alloc, client_fd, id, "0");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    respondOkRaw(alloc, client_fd, id, std.fmt.bufPrint(&buf, "{d}", .{store.unreadCount()}) catch "0");
 }
 
 fn v2WorkspacePorts(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {

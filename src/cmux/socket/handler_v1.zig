@@ -657,6 +657,11 @@ fn cmdSidebarState(alloc: Allocator, client_fd: posix.fd_t) void {
 
     writer.writeAll("{\"workspaces\":") catch return;
     writer.writeAll(ws_json) catch return;
+    // Add notification unread count
+    const notif_store = notification_store.getGlobal();
+    const unread = if (notif_store) |s| s.unreadCount() else 0;
+    writer.print(",\"unread_notifications\":{d}", .{unread}) catch return;
+
     writer.writeAll(",\"ports\":") catch return;
     writer.writeAll(ports_json) catch return;
     writer.writeAll("}") catch return;
