@@ -1339,6 +1339,11 @@ pub const Application = extern struct {
             cmux_notifications.initGlobal(self.allocator()) catch |err| {
                 log.err("failed to init cmux notification store: {}", .{err});
             };
+            // Wire desktop notification dispatch so socket API notifications
+            // are delivered to the user's notification daemon.
+            if (cmux_notifications.getGlobal()) |notif_store| {
+                notif_store.setDispatch(&cmuxDispatchDesktopNotification, @ptrCast(self));
+            }
             cmux_workspaces.initGlobal(self.allocator()) catch |err| {
                 log.err("failed to init cmux workspace manager: {}", .{err});
             };
@@ -1522,6 +1527,9 @@ pub const Application = extern struct {
         };
 
         priv.cmux_server = server;
+
+        // Export socket path so child terminals can find it
+        cmux_socket.setGlobalSocketPath(server.getSocketPath());
     }
 
     fn activate(self: *Self) callconv(.c) void {
@@ -2783,6 +2791,41 @@ const Action = struct {
         }
     }
 };
+
+/// Dispatch callback for the cmux notification store.
+/// Sends a GNotification to the desktop when a notification is added via the socket API.
+fn cmuxDispatchDesktopNotification(ctx: ?*anyopaque, title: []const u8, body: []const u8) void {
+    const self: *Application = @ptrCast(@alignCast(ctx orelse return));
+
+    const default_name = if (comptime build_config.cmux) "cmux" else "Ghostty";
+    const t: [:0]const u8 = if (title.len > 0)
+        glib.ext.dupeZ(u8, title)
+    else
+        default_name;
+    // Only free if we allocated (not the static default)
+    defer if (title.len > 0) glib.free(@ptrCast(@constCast(t.ptr)));
+
+    const notification = gio.Notification.new(t);
+    defer notification.unref();
+
+    if (body.len > 0) {
+        const b: [:0]const u8 = glib.ext.dupeZ(u8, body);
+        defer glib.free(@ptrCast(@constCast(b.ptr)));
+        notification.setBody(b);
+    }
+
+    const icon = gio.ThemedIcon.new(build_config.bundle_id);
+    defer icon.unref();
+    notification.setIcon(icon.as(gio.Icon));
+    notification.setDefaultActionAndTargetValue(
+        "app.present-surface",
+        glib.Variant.newUint64(0),
+    );
+
+    const gio_app = self.as(gio.Application);
+    // Use title as notification ID so duplicate titles replace each other
+    gio_app.sendNotification(t, notification);
+}
 
 /// This sets various GTK-related environment variables as necessary
 /// given the runtime environment or configuration.

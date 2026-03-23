@@ -739,8 +739,50 @@ const Subprocess = struct {
 
         // Set environment variables used by some programs (such as neovim) to detect
         // which terminal emulator and version they're running under.
-        try env.put("TERM_PROGRAM", "ghostty");
+        if (comptime build_config.cmux) {
+            try env.put("TERM_PROGRAM", "cmux");
+        } else {
+            try env.put("TERM_PROGRAM", "ghostty");
+        }
         try env.put("TERM_PROGRAM_VERSION", build_config.version_string);
+
+        // Set cmux-specific environment variables for agent integration.
+        // These allow Claude Code and other agents to discover the socket
+        // and identify which workspace/surface they're running in.
+        if (comptime build_config.cmux) {
+            const cmux_socket = @import("../cmux/socket/server.zig");
+            const cmux_workspace = @import("../cmux/workspace/manager.zig");
+
+            // Socket path — agents use this to connect back to cmux
+            if (cmux_socket.getGlobalSocketPath()) |sock_path| {
+                try env.put("CMUX_SOCKET_PATH", sock_path);
+                try env.put("CMUX_SOCKET", sock_path); // alias
+            }
+
+            // Workspace and surface IDs
+            if (cmux_workspace.getGlobal()) |mgr| {
+                // Active workspace ID
+                var ws_id_buf: [20]u8 = undefined;
+                const ws_id_str = std.fmt.bufPrint(&ws_id_buf, "{d}", .{mgr.activeId()}) catch "1";
+                try env.put("CMUX_WORKSPACE_ID", ws_id_str);
+                try env.put("CMUX_TAB_ID", ws_id_str); // backward compat
+
+                // Port allocation for this workspace
+                const ports = mgr.getActivePortRange();
+                var port_buf: [20]u8 = undefined;
+                var port_end_buf: [20]u8 = undefined;
+                var port_range_buf: [20]u8 = undefined;
+                const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{ports.port}) catch "9100";
+                const port_end_str = std.fmt.bufPrint(&port_end_buf, "{d}", .{ports.port_end}) catch "9109";
+                const port_range_str = std.fmt.bufPrint(&port_range_buf, "{d}", .{ports.range}) catch "10";
+                try env.put("CMUX_PORT", port_str);
+                try env.put("CMUX_PORT_END", port_end_str);
+                try env.put("CMUX_PORT_RANGE", port_range_str);
+            }
+
+            // Shell integration
+            try env.put("CMUX_SHELL_INTEGRATION", "1");
+        }
 
         // VTE_VERSION is set by gnome-terminal and other VTE-based terminals.
         // We don't want our child processes to think we're running under VTE.

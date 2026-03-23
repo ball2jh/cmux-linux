@@ -25,9 +25,14 @@ pub const Workspace = struct {
     focused_panel_id: ?u64 = null,
     git_branch: ?[]const u8 = null, // current branch name
     is_dirty: bool = false, // uncommitted changes
+    port_ordinal: u32 = 0,
     created_at: i64,
     status: WorkspaceStatus,
 };
+
+/// Port allocation config (matching macOS defaults).
+pub const port_base: u32 = 9100;
+pub const port_range: u32 = 10;
 
 /// Workspace manager.
 pub const Manager = struct {
@@ -35,6 +40,7 @@ pub const Manager = struct {
     workspaces: std.ArrayListUnmanaged(Workspace) = .empty,
     active_id: u64 = 0,
     next_id: u64 = 1,
+    next_port_ordinal: u32 = 0,
     mutex: std.Thread.Mutex = .{},
 
     pub fn init(alloc: Allocator) Manager {
@@ -66,10 +72,14 @@ pub const Manager = struct {
         const id = self.next_id;
         self.next_id += 1;
 
+        const ordinal = self.next_port_ordinal;
+        self.next_port_ordinal += 1;
+
         try self.workspaces.append(self.alloc, .{
             .id = id,
             .name = name_copy,
             .cwd = cwd_copy,
+            .port_ordinal = ordinal,
             .created_at = std.time.timestamp(),
             .status = WorkspaceStatus.init(self.alloc),
         });
@@ -228,6 +238,19 @@ pub const Manager = struct {
     /// Get the active workspace's status.
     pub fn getActiveStatus(self: *Manager) ?*WorkspaceStatus {
         return self.getStatus(self.active_id);
+    }
+
+    /// Get the port range for the active workspace.
+    pub fn getActivePortRange(self: *Manager) struct { port: u32, port_end: u32, range: u32 } {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.workspaces.items) |ws| {
+            if (ws.id == self.active_id) {
+                const start = port_base + (ws.port_ordinal * port_range);
+                return .{ .port = start, .port_end = start + port_range - 1, .range = port_range };
+            }
+        }
+        return .{ .port = port_base, .port_end = port_base + port_range - 1, .range = port_range };
     }
 
     /// Format workspace list as JSON for the socket API.

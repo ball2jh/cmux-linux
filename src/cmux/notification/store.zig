@@ -33,8 +33,23 @@ pub const Store = struct {
     next_id: u64 = 1,
     mutex: std.Thread.Mutex = .{},
 
+    /// Optional callback to dispatch desktop notifications (e.g. GNotification).
+    /// Called outside the mutex to avoid deadlocks if the callback re-enters the store.
+    dispatch_fn: ?DispatchFn = null,
+    dispatch_ctx: ?*anyopaque = null,
+
+    pub const DispatchFn = *const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void;
+
     pub fn init(alloc: Allocator) Store {
         return .{ .alloc = alloc };
+    }
+
+    /// Set a callback that fires for each new notification (e.g. to send GNotification).
+    pub fn setDispatch(self: *Store, func: DispatchFn, ctx: ?*anyopaque) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.dispatch_fn = func;
+        self.dispatch_ctx = ctx;
     }
 
     pub fn deinit(self: *Store) void {
@@ -63,46 +78,56 @@ pub const Store = struct {
         surface_id: usize,
         workspace_id: u64,
     ) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const dispatch_fn = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        // Evict oldest if at capacity
-        if (self.entries.items.len >= max_notifications) {
-            var oldest = self.entries.orderedRemove(0);
-            self.freeEntry(&oldest);
+            // Evict oldest if at capacity
+            if (self.entries.items.len >= max_notifications) {
+                var oldest = self.entries.orderedRemove(0);
+                self.freeEntry(&oldest);
+            }
+
+            const title_copy = self.alloc.dupe(u8, title) catch return;
+            const subtitle_copy = self.alloc.dupe(u8, subtitle) catch {
+                self.alloc.free(title_copy);
+                return;
+            };
+            const body_copy = self.alloc.dupe(u8, body) catch {
+                self.alloc.free(title_copy);
+                self.alloc.free(subtitle_copy);
+                return;
+            };
+
+            const now = std.time.timestamp();
+
+            self.entries.append(self.alloc, .{
+                .id = self.next_id,
+                .title = title_copy,
+                .subtitle = subtitle_copy,
+                .body = body_copy,
+                .surface_id = surface_id,
+                .workspace_id = workspace_id,
+                .timestamp = now,
+                .read = false,
+            }) catch {
+                self.alloc.free(title_copy);
+                self.alloc.free(subtitle_copy);
+                self.alloc.free(body_copy);
+                return;
+            };
+            self.next_id += 1;
+
+            log.debug("notification stored: id={} title=\"{s}\"", .{ self.next_id - 1, title });
+            break :blk .{ self.dispatch_fn, self.dispatch_ctx };
+        };
+
+        // Dispatch desktop notification outside the mutex to avoid deadlocks
+        if (dispatch_fn[0]) |func| {
+            const display_title = if (title.len > 0) title else "cmux";
+            const display_body = if (body.len > 0) body else subtitle;
+            func(dispatch_fn[1], display_title, display_body);
         }
-
-        const title_copy = self.alloc.dupe(u8, title) catch return;
-        const subtitle_copy = self.alloc.dupe(u8, subtitle) catch {
-            self.alloc.free(title_copy);
-            return;
-        };
-        const body_copy = self.alloc.dupe(u8, body) catch {
-            self.alloc.free(title_copy);
-            self.alloc.free(subtitle_copy);
-            return;
-        };
-
-        const now = std.time.timestamp();
-
-        self.entries.append(self.alloc, .{
-            .id = self.next_id,
-            .title = title_copy,
-            .subtitle = subtitle_copy,
-            .body = body_copy,
-            .surface_id = surface_id,
-            .workspace_id = workspace_id,
-            .timestamp = now,
-            .read = false,
-        }) catch {
-            self.alloc.free(title_copy);
-            self.alloc.free(subtitle_copy);
-            self.alloc.free(body_copy);
-            return;
-        };
-        self.next_id += 1;
-
-        log.debug("notification stored: id={} title=\"{s}\"", .{ self.next_id - 1, title });
     }
 
     /// Get unread count.

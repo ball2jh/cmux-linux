@@ -60,7 +60,7 @@ pub fn handleCommand(
     } else if (std.mem.eql(u8, command, "notify")) {
         cmdNotify(args, client_fd);
     } else if (std.mem.eql(u8, command, "read-screen")) {
-        cmdReadScreen(app, alloc, client_fd);
+        cmdReadScreen(app, alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "list-workspaces")) {
         cmdListWorkspaces(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "new-workspace")) {
@@ -314,28 +314,60 @@ fn cmdClearNotifications(args: []const u8) void {
     store.clear(null);
 }
 
-fn cmdReadScreen(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+fn cmdReadScreen(app: *gtk.Application, alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
     const surface = getActiveSurface(app) orelse {
         Server.respond(client_fd, "error: no active surface");
         return;
     };
 
-    // Lock the renderer state and read the viewport text
+    // Parse flags
+    const include_scrollback = std.mem.indexOf(u8, args, "--scrollback") != null;
+    const max_lines: ?usize = blk: {
+        const lines_flag = extractFlag(args, "--lines=") orelse break :blk null;
+        break :blk std.fmt.parseInt(usize, lines_flag, 10) catch null;
+    };
+
+    // Lock the renderer state and read terminal text
     surface.renderer_state.mutex.lock();
     defer surface.renderer_state.mutex.unlock();
 
-    const text = surface.io.terminal.plainString(alloc) catch {
-        Server.respond(client_fd, "error: failed to read screen");
-        return;
-    };
+    const text = if (include_scrollback)
+        surface.io.terminal.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} }) catch {
+            Server.respond(client_fd, "error: failed to read screen");
+            return;
+        }
+    else
+        surface.io.terminal.plainString(alloc) catch {
+            Server.respond(client_fd, "error: failed to read screen");
+            return;
+        };
     defer alloc.free(text);
 
     if (text.len == 0) {
         Server.respond(client_fd, "");
-    } else {
-        _ = posix.write(client_fd, text) catch {};
-        _ = posix.write(client_fd, "\n") catch {};
+        return;
     }
+
+    // Apply --lines limit if specified
+    if (max_lines) |limit| {
+        // Find the start position for the last N lines
+        var line_count: usize = 0;
+        var pos: usize = text.len;
+        while (pos > 0) {
+            pos -= 1;
+            if (text[pos] == '\n') {
+                line_count += 1;
+                if (line_count >= limit) {
+                    _ = posix.write(client_fd, text[pos + 1 ..]) catch {};
+                    _ = posix.write(client_fd, "\n") catch {};
+                    return;
+                }
+            }
+        }
+    }
+
+    _ = posix.write(client_fd, text) catch {};
+    _ = posix.write(client_fd, "\n") catch {};
 }
 
 fn cmdNotify(args: []const u8, client_fd: posix.fd_t) void {
@@ -718,22 +750,90 @@ fn getActiveWsStatus() ?*WorkspaceStatus {
     return mgr.getActiveStatus();
 }
 
-fn cmdSetStatus(_: Allocator, args: []const u8, client_fd: posix.fd_t) void {
-    // Format: set-status <key> <value>
+/// Get workspace status by name or numeric ID string.
+fn getWorkspaceStatusByName(name: []const u8) ?*WorkspaceStatus {
+    const mgr = workspace_mgr.getGlobal() orelse return null;
+    const ws_id = findWorkspaceByNameOrActive(mgr, name);
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+    return mgr.getStatus(ws_id);
+}
+
+/// Extract a --flag=value from a string. Returns the value or null.
+fn extractFlag(args: []const u8, prefix: []const u8) ?[]const u8 {
+    const pos = std.mem.indexOf(u8, args, prefix) orelse return null;
+    const start = pos + prefix.len;
+    const end = std.mem.indexOfPos(u8, args, start, " ") orelse args.len;
+    const val = args[start..end];
+    return if (val.len > 0) val else null;
+}
+
+/// Strip all --flag=value tokens from args, returning only the non-flag parts.
+/// Caller owns the returned slice.
+fn stripFlags(alloc: Allocator, args: []const u8) ?[]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var iter = std.mem.tokenizeAny(u8, args, " \t");
+    while (iter.next()) |tok| {
+        if (tok.len >= 2 and tok[0] == '-' and tok[1] == '-') continue; // skip --flag=value
+        if (buf.items.len > 0) buf.append(alloc, ' ') catch return null;
+        buf.appendSlice(alloc, tok) catch return null;
+    }
+    return buf.toOwnedSlice(alloc) catch null;
+}
+
+fn cmdSetStatus(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    // Format: set-status <key> <value> [--icon=X] [--color=Y] [--tab=Z] [--pid=P]
     const space = std.mem.indexOf(u8, args, " ") orelse {
         Server.respond(client_fd, "error: usage: set-status <key> <value>");
         return;
     };
     const key = args[0..space];
-    const value = std.mem.trim(u8, args[space + 1 ..], &[_]u8{ ' ', '\t' });
-    const status = getActiveWsStatus() orelse {
+    const rest = args[space + 1 ..];
+
+    // Parse flags from the rest of the args
+    const icon = extractFlag(rest, "--icon=");
+    const color = extractFlag(rest, "--color=");
+    const tab = extractFlag(rest, "--tab=");
+    _ = extractFlag(rest, "--pid="); // acknowledged but not used yet
+
+    // Strip flags to get clean value
+    const value = stripFlags(alloc, rest) orelse {
+        Server.respond(client_fd, "error: usage: set-status <key> <value>");
+        return;
+    };
+    defer alloc.free(value);
+
+    // Resolve target workspace
+    const target_status = if (tab) |tab_name|
+        getWorkspaceStatusByName(tab_name)
+    else
+        getActiveWsStatus();
+
+    const status = target_status orelse {
         Server.respond(client_fd, "error: no active workspace");
         return;
     };
+
     status.setStatus(key, value) catch {
         Server.respond(client_fd, "error: failed to set status");
         return;
     };
+
+    // Apply icon and color if provided
+    for (status.statuses.items) |*s| {
+        if (std.mem.eql(u8, s.key, key)) {
+            if (icon) |ic| {
+                if (s.icon) |old| status.alloc.free(old);
+                s.icon = status.alloc.dupe(u8, ic) catch null;
+            }
+            if (color) |c| {
+                if (s.color) |old| status.alloc.free(old);
+                s.color = status.alloc.dupe(u8, c) catch null;
+            }
+            break;
+        }
+    }
+
     Server.respond(client_fd, "ok");
 }
 
@@ -755,12 +855,30 @@ fn cmdListStatus(alloc: Allocator, client_fd: posix.fd_t) void {
 }
 
 fn cmdClearStatus(args: []const u8, client_fd: posix.fd_t) void {
-    const status = getActiveWsStatus() orelse {
+    // Support: clear-status <key> [--tab=WORKSPACE]
+    const tab = extractFlag(args, "--tab=");
+    const target_status = if (tab) |tab_name|
+        getWorkspaceStatusByName(tab_name)
+    else
+        getActiveWsStatus();
+
+    const status = target_status orelse {
         Server.respond(client_fd, "ok");
         return;
     };
-    if (args.len > 0) {
-        status.clearStatus(args);
+
+    // Extract key (strip flags)
+    var key: []const u8 = "";
+    var iter = std.mem.tokenizeAny(u8, args, " \t");
+    while (iter.next()) |tok| {
+        if (tok.len > 0 and tok[0] != '-') {
+            key = tok;
+            break;
+        }
+    }
+
+    if (key.len > 0) {
+        status.clearStatus(key);
     } else {
         status.clearAllStatuses();
     }

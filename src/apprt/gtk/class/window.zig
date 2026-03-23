@@ -40,8 +40,9 @@ var cmux_sidebar_paned: ?*gtk.Paned = null;
 var cmux_sidebar_visible: bool = true;
 var cmux_notif_box: ?*gtk.Box = null;
 var cmux_sidebar_last_hash: u64 = 0;
-// Maps workspace_id -> TabPage index for workspace-tab switching
 var cmux_window_ref: ?*gtk.Window = null;
+// Workspace content Stack: each workspace gets its own page
+var cmux_workspace_stack: ?*gtk.Stack = null;
 
 pub const Window = extern struct {
     const Self = @This();
@@ -582,23 +583,32 @@ pub const Window = extern struct {
 
         sidebar_container.append(ws_scrolled.as(gtk.Widget));
 
-        // Create a paned: sidebar | content
+        // Create workspace content Stack — each workspace gets its own page
+        const ws_stack = gtk.Stack.new();
+        ws_stack.setTransitionType(.crossfade);
+        ws_stack.setTransitionDuration(150);
+        ws_stack.as(gtk.Widget).setHexpand(1);
+        ws_stack.as(gtk.Widget).setVexpand(1);
+        cmux_workspace_stack = ws_stack;
+
+        // The existing toast_overlay (containing the original TabView from
+        // the Blueprint template) becomes workspace 1's ("default") page.
+        toast_widget.unparent();
+        _ = ws_stack.addNamed(toast_widget, "ws-1");
+
+        // Create a paned: sidebar | workspace stack
         const paned = gtk.Paned.new(.horizontal);
         const paned_widget = paned.as(gtk.Widget);
         paned_widget.addCssClass("cmux-main-paned");
 
-        // Reparent toast_overlay from the parent box to our paned.
-        toast_widget.unparent();
-
-        // Set up the paned children
         paned.setStartChild(sidebar_container.as(gtk.Widget));
-        paned.setEndChild(toast_widget);
+        paned.setEndChild(ws_stack.as(gtk.Widget));
         paned.setPosition(200);
         paned.setShrinkStartChild(0);
         paned.setResizeStartChild(0);
         cmux_sidebar_paned = paned;
 
-        // Add paned to the parent box where toast_overlay was
+        // Add paned to the parent box
         const parent_box: *gtk.Box = @ptrCast(@alignCast(parent_widget));
         parent_box.append(paned_widget);
 
@@ -731,15 +741,35 @@ pub const Window = extern struct {
         const mgr = cmux_ws.getGlobal() orelse return;
         const ws_id = mgr.create("workspace", null) catch return;
 
-        // Select the new workspace
         mgr.mutex.lock();
         mgr.active_id = ws_id;
         mgr.mutex.unlock();
 
-        // Create a new tab for it
+        const ws_stack = cmux_workspace_stack orelse return;
         const gtk_win = cmux_window_ref orelse return;
         const window = gobject.ext.cast(Window, gtk_win) orelse return;
-        window.newTab(null);
+        _ = window;
+
+        // Create a GhosttyTab with its own terminal surface.
+        // The Tab creates its own SplitTree with a terminal in init().
+        const app = Application.default();
+        const tab = gobject.ext.newInstance(Tab, .{
+            .config = app.getConfig(),
+        });
+
+        // Wrap in a box for the Stack page
+        const ws_box = gtk.Box.new(.vertical, 0);
+        ws_box.as(gtk.Widget).setHexpand(1);
+        ws_box.as(gtk.Widget).setVexpand(1);
+        ws_box.append(tab.as(gtk.Widget));
+
+        // Add to the workspace Stack with a unique page name
+        var page_name_buf: [32]u8 = undefined;
+        const page_name = std.fmt.bufPrintZ(&page_name_buf, "ws-{d}", .{ws_id}) catch "ws-new";
+        _ = ws_stack.addNamed(ws_box.as(gtk.Widget), page_name);
+
+        // Switch to show the new workspace
+        ws_stack.setVisibleChildName(page_name);
 
         // Force sidebar refresh
         cmux_sidebar_last_hash = 0;
@@ -767,21 +797,15 @@ pub const Window = extern struct {
             mgr.mutex.unlock();
             return;
         }
-        mgr.active_id = mgr.workspaces.items[idx].id;
+        const ws_id = mgr.workspaces.items[idx].id;
+        mgr.active_id = ws_id;
         mgr.mutex.unlock();
 
-        // Switch to the corresponding tab in the TabView
-        // Each workspace maps to a tab by index. If there aren't enough
-        // tabs, just select the last one — don't create new tabs.
-        const gtk_win = cmux_window_ref orelse return;
-        const window = gobject.ext.cast(Window, gtk_win) orelse return;
-        const tab_view = window.getTabView();
-        const n_pages = tab_view.getNPages();
-        if (n_pages <= 0) return;
-
-        const target = if (index < n_pages) index else n_pages - 1;
-        const page = tab_view.getNthPage(target);
-        tab_view.setSelectedPage(page);
+        // Switch the workspace Stack to show this workspace's page
+        const ws_stack = cmux_workspace_stack orelse return;
+        var page_name_buf: [32]u8 = undefined;
+        const page_name = std.fmt.bufPrintZ(&page_name_buf, "ws-{d}", .{ws_id}) catch return;
+        ws_stack.setVisibleChildName(page_name);
     }
 
     /// DragSource prepare: returns a ContentProvider with the workspace index.

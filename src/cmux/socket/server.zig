@@ -312,4 +312,21 @@ pub const Server = struct {
         _ = posix.write(fd, msg) catch {};
         _ = posix.write(fd, "\n") catch {};
     }
+
+    /// Get the socket path for this server.
+    pub fn getSocketPath(self: *const Server) []const u8 {
+        return self.socket_path;
+    }
 };
+
+/// Global socket path for use by child terminal env vars.
+/// Set when the server starts, read by Exec.zig.
+var global_socket_path: ?[]const u8 = null;
+
+pub fn setGlobalSocketPath(path: []const u8) void {
+    global_socket_path = path;
+}
+
+pub fn getGlobalSocketPath() ?[]const u8 {
+    return global_socket_path;
+}
