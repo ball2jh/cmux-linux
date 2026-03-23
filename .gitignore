@@ -25,3 +25,7 @@ glad.zip
 /ghostty.qcow2
 
 vgcore.*
+aur/src/
+aur/pkg/
+aur/*.pkg.tar.zst
+aur/cmux-linux
