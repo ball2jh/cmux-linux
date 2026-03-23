@@ -416,7 +416,9 @@ pub const Window = extern struct {
                 top_hbox.as(gtk.Widget).setHexpand(1);
 
                 // Workspace name (12.5pt semibold equivalent)
-                const name_label = gtk.Label.new(@ptrCast(ws.name.ptr));
+                var name_buf: [128]u8 = undefined;
+                const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{ws.name}) catch "?";
+                const name_label = gtk.Label.new(name_z);
                 const name_widget = name_label.as(gtk.Widget);
                 name_widget.addCssClass("cmux-ws-name");
                 name_widget.setHalign(.start);
@@ -655,7 +657,9 @@ pub const Window = extern struct {
             const top_hbox = gtk.Box.new(.horizontal, 4);
             top_hbox.as(gtk.Widget).setHexpand(1);
 
-            const name_label = gtk.Label.new(@ptrCast(ws.name.ptr));
+            var name_buf: [128]u8 = undefined;
+                const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{ws.name}) catch "?";
+                const name_label = gtk.Label.new(name_z);
             name_label.as(gtk.Widget).addCssClass("cmux-ws-name");
             name_label.as(gtk.Widget).setHalign(.start);
             name_label.as(gtk.Widget).setHexpand(1);
