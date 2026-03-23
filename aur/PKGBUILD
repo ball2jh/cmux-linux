@@ -72,9 +72,17 @@ package() {
         [ -f "$f" ] && install -Dm644 "$f" "$pkgdir/usr/share/applications/$(basename "$f")"
     done
 
-    # Icons (if present)
+    # Icons — Ghostty icons from build
     if [ -d zig-out/share/icons ]; then
         cp -r zig-out/share/icons "$pkgdir/usr/share/"
+    fi
+
+    # cmux-specific icons (from macOS cmux assets)
+    if [ -d dist/linux/cmux-icons/hicolor ]; then
+        for size in 16x16 32x32 128x128 256x256 512x512; do
+            install -Dm644 "dist/linux/cmux-icons/hicolor/$size/apps/ai.manaflow.cmux.png" \
+                "$pkgdir/usr/share/icons/hicolor/$size/apps/ai.manaflow.cmux.png"
+        done
     fi
 
     # Licenses
