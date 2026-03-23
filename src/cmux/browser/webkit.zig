@@ -217,6 +217,205 @@ fn snapshotCallback(
     }
 }
 
+// === Cookie Manager (native WebKitGTK API, not JS workaround) ===
+
+/// Get all cookies via native WebKitCookieManager. Async — writes result to fd.
+pub fn getAllCookies(widget: *gtk.Widget, alloc: std.mem.Allocator, client_fd: std.posix.fd_t) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const session = c.webkit_web_view_get_network_session(web_view);
+    if (session == null) {
+        const Server = @import("../socket/server.zig").Server;
+        Server.respond(client_fd, "error: no network session");
+        return;
+    }
+    const cookie_mgr = c.webkit_network_session_get_cookie_manager(session);
+    if (cookie_mgr == null) {
+        const Server = @import("../socket/server.zig").Server;
+        Server.respond(client_fd, "error: no cookie manager");
+        return;
+    }
+
+    const ctx = alloc.create(EvalContext) catch return;
+    ctx.* = .{ .alloc = alloc, .fd = client_fd };
+
+    c.webkit_cookie_manager_get_all_cookies(
+        cookie_mgr,
+        null, // cancellable
+        &cookieGetCallback,
+        @ptrCast(ctx),
+    );
+}
+
+fn cookieGetCallback(
+    source_object: ?*c.GObject,
+    result: ?*c.GAsyncResult,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    const ctx: *EvalContext = @ptrCast(@alignCast(user_data orelse return));
+    defer ctx.alloc.destroy(ctx);
+
+    const Server = @import("../socket/server.zig").Server;
+
+    var err: ?*c.GError = null;
+    const cookie_list = c.webkit_cookie_manager_get_all_cookies_finish(
+        @ptrCast(@alignCast(source_object)),
+        result,
+        &err,
+    );
+
+    if (err) |e| {
+        Server.respond(ctx.fd, "error: get cookies failed");
+        c.g_error_free(e);
+        return;
+    }
+
+    // Serialize cookie list to JSON
+    var buf: [4096]u8 = undefined;
+    var len: usize = 0;
+    buf[0] = '[';
+    len = 1;
+
+    var count: usize = 0;
+    var node: ?*c.GList = cookie_list;
+    while (node) |n| {
+        const cookie: *c.SoupCookie = @ptrCast(@alignCast(n.data));
+        if (count > 0 and len < buf.len - 1) {
+            buf[len] = ',';
+            len += 1;
+        }
+        const name_c = c.soup_cookie_get_name(cookie);
+        const value_c = c.soup_cookie_get_value(cookie);
+        const domain_c = c.soup_cookie_get_domain(cookie);
+        const path_c = c.soup_cookie_get_path(cookie);
+        const http_only = c.soup_cookie_get_http_only(cookie);
+        const secure = c.soup_cookie_get_secure(cookie);
+
+        const name = if (name_c != null) std.mem.span(name_c) else "";
+        const value = if (value_c != null) std.mem.span(value_c) else "";
+        const domain = if (domain_c != null) std.mem.span(domain_c) else "";
+        const path = if (path_c != null) std.mem.span(path_c) else "";
+
+        const written = std.fmt.bufPrint(buf[len..], "{{\"name\":\"{s}\",\"value\":\"{s}\",\"domain\":\"{s}\",\"path\":\"{s}\",\"httpOnly\":{s},\"secure\":{s}}}", .{
+            name,  value,  domain, path,
+            if (http_only != 0) "true" else "false",
+            if (secure != 0) "true" else "false",
+        }) catch break;
+        len += written.len;
+        count += 1;
+        node = n.next;
+    }
+
+    if (len < buf.len - 1) {
+        buf[len] = ']';
+        len += 1;
+    }
+
+    Server.respond(ctx.fd, buf[0..len]);
+
+    if (cookie_list != null) {
+        // Free the cookie list
+        var free_node: ?*c.GList = cookie_list;
+        while (free_node) |fn_node| {
+            c.soup_cookie_free(@ptrCast(@alignCast(fn_node.data)));
+            free_node = fn_node.next;
+        }
+        c.g_list_free(cookie_list);
+    }
+}
+
+/// Add a cookie via native API.
+pub fn addCookie(
+    widget: *gtk.Widget,
+    name: [*:0]const u8,
+    value: [*:0]const u8,
+    domain: [*:0]const u8,
+    path: [*:0]const u8,
+    alloc: std.mem.Allocator,
+    client_fd: std.posix.fd_t,
+) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const session = c.webkit_web_view_get_network_session(web_view) orelse return;
+    const cookie_mgr = c.webkit_network_session_get_cookie_manager(session) orelse return;
+
+    const cookie = c.soup_cookie_new(name, value, domain, path, -1); // -1 = session cookie
+    if (cookie == null) return;
+
+    const ctx = alloc.create(EvalContext) catch return;
+    ctx.* = .{ .alloc = alloc, .fd = client_fd };
+
+    c.webkit_cookie_manager_add_cookie(
+        cookie_mgr,
+        cookie,
+        null,
+        &cookieAddCallback,
+        @ptrCast(ctx),
+    );
+}
+
+fn cookieAddCallback(
+    source_object: ?*c.GObject,
+    result: ?*c.GAsyncResult,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    const ctx: *EvalContext = @ptrCast(@alignCast(user_data orelse return));
+    defer ctx.alloc.destroy(ctx);
+
+    const Server = @import("../socket/server.zig").Server;
+    var err: ?*c.GError = null;
+    _ = c.webkit_cookie_manager_add_cookie_finish(
+        @ptrCast(@alignCast(source_object)),
+        result,
+        &err,
+    );
+
+    if (err) |e| {
+        Server.respond(ctx.fd, "error: add cookie failed");
+        c.g_error_free(e);
+    } else {
+        Server.respond(ctx.fd, "ok");
+    }
+}
+
+/// Clear all cookies by replacing with empty list.
+pub fn clearCookies(widget: *gtk.Widget, alloc: std.mem.Allocator, client_fd: std.posix.fd_t) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const session = c.webkit_web_view_get_network_session(web_view) orelse return;
+    const cookie_mgr = c.webkit_network_session_get_cookie_manager(session) orelse return;
+
+    const ctx = alloc.create(EvalContext) catch return;
+    ctx.* = .{ .alloc = alloc, .fd = client_fd };
+
+    c.webkit_cookie_manager_replace_cookies(
+        cookie_mgr,
+        null, // empty list = clear all
+        null,
+        &cookieClearCallback,
+        @ptrCast(ctx),
+    );
+}
+
+fn cookieClearCallback(
+    source_object: ?*c.GObject,
+    result: ?*c.GAsyncResult,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    const ctx: *EvalContext = @ptrCast(@alignCast(user_data orelse return));
+    defer ctx.alloc.destroy(ctx);
+    const Server = @import("../socket/server.zig").Server;
+    var err: ?*c.GError = null;
+    _ = c.webkit_cookie_manager_replace_cookies_finish(
+        @ptrCast(@alignCast(source_object)),
+        result,
+        &err,
+    );
+    if (err) |e| {
+        Server.respond(ctx.fd, "error: clear cookies failed");
+        c.g_error_free(e);
+    } else {
+        Server.respond(ctx.fd, "cleared");
+    }
+}
+
 /// Get the page source HTML via JavaScript.
 pub fn getPageSource(
     widget: *gtk.Widget,

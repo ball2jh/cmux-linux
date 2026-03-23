@@ -171,23 +171,23 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "browser.errors.list")) {
         respondOkRaw(alloc, client_fd, id, "[]");
     } else if (std.mem.eql(u8, method, "browser.cookies.get")) {
-        respondOkRaw(alloc, client_fd, id, "[]");
+        v2BrowserCookieGetNative(alloc, params, client_fd);
     } else if (std.mem.eql(u8, method, "browser.cookies.set")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserCookieSetNative(alloc, params, client_fd);
     } else if (std.mem.eql(u8, method, "browser.cookies.clear")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserCookieClearNative(alloc, params, client_fd);
     } else if (std.mem.eql(u8, method, "browser.storage.get")) {
-        respondOkRaw(alloc, client_fd, id, "null");
+        v2BrowserStorageGet(alloc, params, client_fd);
     } else if (std.mem.eql(u8, method, "browser.storage.set")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserStorageSet(alloc, params, client_fd);
     } else if (std.mem.eql(u8, method, "browser.storage.clear")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserRunJs(alloc, params, client_fd, "localStorage.clear();sessionStorage.clear();'cleared'");
     } else if (std.mem.eql(u8, method, "browser.network.list")) {
-        respondOkRaw(alloc, client_fd, id, "[]");
+        v2BrowserRunJs(alloc, params, client_fd, "JSON.stringify(performance.getEntriesByType('resource').map(function(e){return {name:e.name,duration:Math.round(e.duration),size:e.transferSize}}))");
     } else if (std.mem.eql(u8, method, "browser.network.clear")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserRunJs(alloc, params, client_fd, "performance.clearResourceTimings();'cleared'");
     } else if (std.mem.eql(u8, method, "browser.frame.list")) {
-        respondOkRaw(alloc, client_fd, id, "[]");
+        v2BrowserRunJs(alloc, params, client_fd, "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(function(f,i){return {id:i,src:f.src,name:f.name}}))");
     } else if (std.mem.eql(u8, method, "browser.geolocation.set")) {
         respondOkString(alloc, client_fd, id, "ok");
     } else if (std.mem.eql(u8, method, "browser.offline.set")) {
@@ -675,6 +675,116 @@ fn v2BrowserSnapshot(alloc: Allocator, params: ?std.json.Value, _: ?std.json.Val
         }
     }
     respondError(alloc, client_fd, null, "no_browser", "no browser widget for panel");
+}
+
+/// Run arbitrary JS in a browser panel via evaluateJavaScript.
+/// Response is written async by the WebKit callback.
+fn v2BrowserRunJs(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t, script: [*:0]const u8) void {
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.evaluateJavaScript(w, script, alloc, client_fd);
+            return;
+        }
+    }
+    Server.respond(client_fd, "error: no browser widget");
+}
+
+fn v2BrowserCookieGetNative(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.getAllCookies(w, alloc, client_fd);
+            return;
+        }
+    }
+    Server.respond(client_fd, "[]");
+}
+
+fn v2BrowserCookieSetNative(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
+    const name = getParamString(params, "name") orelse {
+        Server.respond(client_fd, "error: missing name");
+        return;
+    };
+    const value = getParamString(params, "value") orelse "";
+    const domain = getParamString(params, "domain") orelse "localhost";
+    const path = getParamString(params, "path") orelse "/";
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            const name_z = alloc.dupeZ(u8, name) catch return;
+            defer alloc.free(name_z);
+            const value_z = alloc.dupeZ(u8, value) catch return;
+            defer alloc.free(value_z);
+            const domain_z = alloc.dupeZ(u8, domain) catch return;
+            defer alloc.free(domain_z);
+            const path_z = alloc.dupeZ(u8, path) catch return;
+            defer alloc.free(path_z);
+            webkit.addCookie(w, name_z, value_z, domain_z, path_z, alloc, client_fd);
+            return;
+        }
+    }
+    Server.respond(client_fd, "error: no browser widget");
+}
+
+fn v2BrowserCookieClearNative(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.clearCookies(w, alloc, client_fd);
+            return;
+        }
+    }
+    Server.respond(client_fd, "cleared");
+}
+
+fn v2BrowserStorageGet(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
+    const key = getParamString(params, "key") orelse {
+        // Return all storage
+        v2BrowserRunJs(alloc, params, client_fd, "JSON.stringify(Object.fromEntries(Object.entries(localStorage)))");
+        return;
+    };
+
+    // Build JS: localStorage.getItem('key')
+    const script = alloc.allocSentinel(u8, key.len + 32, 0) catch {
+        Server.respond(client_fd, "error: alloc failed");
+        return;
+    };
+    defer alloc.free(script);
+
+    _ = std.fmt.bufPrint(script[0 .. key.len + 32], "localStorage.getItem('{s}')", .{key}) catch return;
+    script[key.len + 31] = 0;
+
+    v2BrowserRunJs(alloc, params, client_fd, @ptrCast(script.ptr));
+}
+
+fn v2BrowserStorageSet(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
+    const key = getParamString(params, "key") orelse {
+        Server.respond(client_fd, "error: missing key");
+        return;
+    };
+    const value = getParamString(params, "value") orelse "";
+
+    const script = alloc.allocSentinel(u8, key.len + value.len + 40, 0) catch {
+        Server.respond(client_fd, "error: alloc failed");
+        return;
+    };
+    defer alloc.free(script);
+
+    _ = std.fmt.bufPrint(script[0 .. key.len + value.len + 40], "localStorage.setItem('{s}','{s}');'set'", .{ key, value }) catch return;
+    script[key.len + value.len + 39] = 0;
+
+    v2BrowserRunJs(alloc, params, client_fd, @ptrCast(script.ptr));
 }
 
 fn v2MarkdownOpen(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
