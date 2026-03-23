@@ -56,7 +56,14 @@ cmux +ctl new-window         # Open a new window
 cmux +ctl list-workspaces    # List workspaces
 cmux +ctl new-workspace dev  # Create workspace "dev"
 cmux +ctl notify "Build done"  # Create notification
+cmux +ctl new-tab              # Open new tab
+cmux +ctl new-split right      # Split terminal right
+cmux +ctl send-key enter       # Send enter key
+cmux +ctl send-key ctrl-c      # Send ctrl-c
+cmux +ctl set-status branch main  # Set sidebar status
+cmux +ctl list-ports           # Show listening TCP ports
 cmux +ctl open-browser "http://localhost:3000"  # Open browser panel
+cmux +ctl sidebar-state        # Full sidebar JSON dump
 ```
 
 ### Socket API (V1)

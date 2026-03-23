@@ -69,6 +69,12 @@ pub fn handleCommand(
         cmdRenameWorkspace(alloc, args, client_fd);
     } else if (std.mem.eql(u8, command, "current-workspace")) {
         cmdCurrentWorkspace(client_fd);
+    } else if (std.mem.eql(u8, command, "new-tab")) {
+        cmdNewTab(app);
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, command, "close-tab")) {
+        cmdCloseTab(app);
+        Server.respond(client_fd, "ok");
     } else if (std.mem.eql(u8, command, "new-split")) {
         cmdNewSplit(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "list-panes")) {
@@ -495,6 +501,21 @@ fn cmdFocusWindow(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t
     } else {
         Server.respond(client_fd, "error: no window to focus");
     }
+}
+
+fn cmdNewTab(app: *gtk.Application) void {
+    // Create a new tab by getting the active window and calling newTab
+    if (app.getActiveWindow()) |gtk_win| {
+        if (gobject.ext.cast(Window, gtk_win)) |window| {
+            window.newTab(null);
+        }
+    }
+}
+
+fn cmdCloseTab(app: *gtk.Application) void {
+    // Close the active tab's surface
+    const surface = getActiveSurface(app) orelse return;
+    _ = surface.performBindingAction(.close_surface) catch {};
 }
 
 fn cmdCloseSurface(app: *gtk.Application, client_fd: posix.fd_t) void {
