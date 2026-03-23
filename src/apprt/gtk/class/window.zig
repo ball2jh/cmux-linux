@@ -833,7 +833,32 @@ pub const Window = extern struct {
             }
 
             sidebar_list.append(row_box.as(gtk.Widget));
+
+            // Add drag source for DnD reordering
+            const drag_source = gtk.DragSource.new();
+            drag_source.setActions(.{ .move = true });
+            // Store the workspace index on the row widget for the prepare callback
+            gobject.Object.setData(row_box.as(gobject.Object), "cmux-ws-idx", @ptrFromInt(ws_idx + 1));
+            _ = gtk.DragSource.signals.prepare.connect(
+                drag_source,
+                *gtk.Box,
+                &cmuxDragPrepare,
+                row_box,
+                .{},
+            );
+            row_box.as(gtk.Widget).addController(drag_source.as(gtk.EventController));
         }
+
+        // Add drop target to the ListBox for DnD reordering
+        const drop_target = gtk.DropTarget.new(gobject.ext.typeFor(u64), .{ .move = true });
+        _ = gtk.DropTarget.signals.drop.connect(
+            drop_target,
+            *gtk.ListBox,
+            &cmuxDragDrop,
+            sidebar_list,
+            .{},
+        );
+        sidebar_list.as(gtk.Widget).addController(drop_target.as(gtk.EventController));
 
         // Also refresh notification panel
         if (cmux_notif_box) |nbox| {
@@ -931,6 +956,39 @@ pub const Window = extern struct {
         if (idx < mgr.workspaces.items.len) {
             mgr.active_id = mgr.workspaces.items[idx].id;
         }
+    }
+
+    /// DragSource prepare: returns a ContentProvider with the workspace index.
+    fn cmuxDragPrepare(_: *gtk.DragSource, _: f64, _: f64, row_box: *gtk.Box) callconv(.c) ?*gdk.ContentProvider {
+        const idx_ptr = gobject.Object.getData(row_box.as(gobject.Object), "cmux-ws-idx");
+        const ws_idx: u64 = @intFromPtr(idx_ptr);
+        return gdk.ContentProvider.newTyped(gobject.ext.typeFor(u64), ws_idx);
+    }
+
+    /// DropTarget drop: receives workspace index value, calculates target, reorders.
+    fn cmuxDragDrop(_: *gtk.DropTarget, value: *gobject.Value, _: f64, y: f64, sidebar_list: *gtk.ListBox) callconv(.c) c_int {
+        _ = sidebar_list;
+        const src_idx_raw: u64 = gobject.ext.Value.get(value, u64);
+        if (src_idx_raw == 0) return 0;
+        const src_idx: usize = @intCast(src_idx_raw - 1); // We stored idx+1
+
+        const row_height: f64 = 40.0;
+        const target_idx: usize = @intFromFloat(@max(0, y / row_height));
+
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const mgr = cmux_ws.getGlobal() orelse return 0;
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+
+        if (src_idx >= mgr.workspaces.items.len) return 0;
+        const dst = @min(target_idx, mgr.workspaces.items.len - 1);
+
+        if (src_idx != dst) {
+            const item = mgr.workspaces.orderedRemove(src_idx);
+            mgr.workspaces.insertAssumeCapacity(@intCast(dst), item);
+        }
+
+        return 1;
     }
 
     /// Winproto backend for this window.

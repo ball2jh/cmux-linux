@@ -222,8 +222,7 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "workspace.reorder")) {
         v2WorkspaceReorder(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.move_to_window")) {
-        // Single window on Linux for now — acknowledge
-        respondOkString(alloc, client_fd, id, "single_window");
+        v2WorkspaceMoveToWindow(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "app.focus_override.set")) {
         v2AppFocus(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "app.simulate_active")) {
@@ -868,6 +867,53 @@ fn v2WorkspaceReorder(alloc: Allocator, params: ?std.json.Value, id: ?std.json.V
         mgr.workspaces.insertAssumeCapacity(@intCast(dst), item);
     }
     respondOkString(alloc, client_fd, id, "reordered");
+}
+
+fn v2WorkspaceMoveToWindow(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const target_window_id = getParamInt(params, "window_id") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing window_id");
+        return;
+    };
+
+    // Get the source window (active) and its selected tab page
+    const src_win = app.getActiveWindow() orelse {
+        respondError(alloc, client_fd, id, "no_window", "no active window");
+        return;
+    };
+    const src_window = gobject.ext.cast(Window, src_win) orelse {
+        respondError(alloc, client_fd, id, "no_window", "not a cmux window");
+        return;
+    };
+    const src_tab_view = src_window.getTabView();
+    const src_page = src_tab_view.getSelectedPage() orelse {
+        respondError(alloc, client_fd, id, "no_tab", "no selected tab");
+        return;
+    };
+
+    // Find the target window by ID (pointer address)
+    const glib_mod = @import("glib");
+    const windows = app.getWindows();
+    var node: ?*glib_mod.List = windows;
+    while (node) |n| {
+        if (n.f_data) |data| {
+            if (@intFromPtr(data) == target_window_id) {
+                const target_gtk_win: *gtk.Window = @ptrCast(@alignCast(data));
+                const target_window = gobject.ext.cast(Window, target_gtk_win) orelse continue;
+                const target_tab_view = target_window.getTabView();
+
+                // Transfer the page to the target window
+                const adw_mod = @import("adw");
+                _ = adw_mod;
+                src_tab_view.transferPage(src_page, target_tab_view, -1); // -1 = append
+
+                respondOkString(alloc, client_fd, id, "transferred");
+                return;
+            }
+        }
+        node = n.f_next;
+    }
+
+    respondError(alloc, client_fd, id, "not_found", "target window not found");
 }
 
 fn v2AppFocus(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
