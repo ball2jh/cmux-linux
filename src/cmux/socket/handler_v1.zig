@@ -111,6 +111,12 @@ pub fn handleCommand(
         Server.respond(client_fd, "ok");
     } else if (std.mem.eql(u8, command, "sidebar-state")) {
         cmdSidebarState(alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "browser-back")) {
+        cmdBrowserBack(args, client_fd);
+    } else if (std.mem.eql(u8, command, "browser-forward")) {
+        cmdBrowserForward(args, client_fd);
+    } else if (std.mem.eql(u8, command, "browser-reload")) {
+        cmdBrowserReload(args, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -712,6 +718,48 @@ fn cmdGetUrl(args: []const u8, client_fd: posix.fd_t) void {
         return;
     };
     Server.respond(client_fd, browser.getUrl(id) orelse "error: browser not found");
+}
+
+fn cmdBrowserBack(args: []const u8, client_fd: posix.fd_t) void {
+    const id = std.fmt.parseInt(usize, if (args.len > 0) args else "0", 10) catch 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser.getWidget(id)) |w| {
+            webkit.goBack(w);
+            Server.respond(client_fd, "ok");
+            return;
+        }
+    }
+    Server.respond(client_fd, "error: no browser widget");
+}
+
+fn cmdBrowserForward(args: []const u8, client_fd: posix.fd_t) void {
+    const id = std.fmt.parseInt(usize, if (args.len > 0) args else "0", 10) catch 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser.getWidget(id)) |w| {
+            webkit.goForward(w);
+            Server.respond(client_fd, "ok");
+            return;
+        }
+    }
+    Server.respond(client_fd, "error: no browser widget");
+}
+
+fn cmdBrowserReload(args: []const u8, client_fd: posix.fd_t) void {
+    const id = std.fmt.parseInt(usize, if (args.len > 0) args else "0", 10) catch 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser.getWidget(id)) |w| {
+            webkit.reload(w);
+            Server.respond(client_fd, "ok");
+            return;
+        }
+    }
+    Server.respond(client_fd, "error: no browser widget");
 }
 
 /// Get the active core Surface from the GTK Application.

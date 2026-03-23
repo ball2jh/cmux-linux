@@ -689,6 +689,11 @@ fn addGtkNg(
         step.linkSystemLibrary2("wayland-client", dynamic_link_opts);
     }
 
+    // cmux: link WebKitGTK for browser panel
+    if (self.config.cmux) {
+        step.linkSystemLibrary2("webkitgtk-6.0", dynamic_link_opts);
+    }
+
     {
         // Get our gresource c/h files and add them to our build.
         const dist = gtkNgDistResources(b);

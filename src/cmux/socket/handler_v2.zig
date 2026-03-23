@@ -127,6 +127,12 @@ fn dispatch(
         v2BrowserGetUrl(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.list")) {
         v2BrowserList(alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.back")) {
+        handler_v1.handleCommand(@ptrCast(app), alloc, "browser-back", "0", client_fd);
+    } else if (std.mem.eql(u8, method, "browser.forward")) {
+        handler_v1.handleCommand(@ptrCast(app), alloc, "browser-forward", "0", client_fd);
+    } else if (std.mem.eql(u8, method, "browser.reload")) {
+        handler_v1.handleCommand(@ptrCast(app), alloc, "browser-reload", "0", client_fd);
     } else if (std.mem.eql(u8, method, "notification.create")) {
         v2NotificationCreate(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.unread_count")) {
