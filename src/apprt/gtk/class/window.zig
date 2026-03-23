@@ -32,6 +32,10 @@ const WeakRef = @import("../weak_ref.zig").WeakRef;
 
 const log = std.log.scoped(.gtk_ghostty_window);
 
+// cmux: module-level sidebar state for dynamic refresh
+var cmux_sidebar_listbox: ?*gtk.ListBox = null;
+var cmux_sidebar_timer: c_uint = 0;
+
 pub const Window = extern struct {
     const Self = @This();
     parent_instance: Parent,
@@ -380,6 +384,9 @@ pub const Window = extern struct {
         sidebar_widget.setSizeRequest(200, -1);
         sidebar.setSelectionMode(.single);
 
+        // Store reference for dynamic refresh
+        cmux_sidebar_listbox = sidebar;
+
         // Add workspace entries from the workspace manager
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
         const notification_store = @import("../../../cmux/notification/store.zig");
@@ -644,7 +651,139 @@ pub const Window = extern struct {
         const parent_box: *gtk.Box = @ptrCast(@alignCast(parent_widget));
         parent_box.append(paned_widget);
 
+        // Start periodic sidebar refresh (2 seconds)
+        cmux_sidebar_timer = glib.timeoutAdd(2000, &cmuxSidebarRefreshCallback, null);
+
         log.info("cmux workspace sidebar initialized with notification panel", .{});
+    }
+
+    /// Periodic callback to refresh sidebar content.
+    fn cmuxSidebarRefreshCallback(_: ?*anyopaque) callconv(.c) c_int {
+        if (comptime !build_config.cmux) return 0;
+
+        const sidebar_list = cmux_sidebar_listbox orelse return 1;
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const notification_store = @import("../../../cmux/notification/store.zig");
+        const port_scanner = @import("../../../cmux/workspace/port_scanner.zig");
+        const mgr = cmux_ws.getGlobal() orelse return 1;
+
+        // Remove all existing rows
+        while (sidebar_list.getRowAtIndex(0)) |row| {
+            sidebar_list.remove(row.as(gtk.Widget));
+        }
+
+        // Rebuild rows (same logic as initWorkspaceSidebar)
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+
+        for (mgr.workspaces.items) |ws| {
+            const row_box = gtk.Box.new(.vertical, 1);
+            row_box.as(gtk.Widget).addCssClass("cmux-ws-row");
+
+            // Name + badge
+            const top_hbox = gtk.Box.new(.horizontal, 4);
+            top_hbox.as(gtk.Widget).setHexpand(1);
+
+            const name_label = gtk.Label.new(@ptrCast(ws.name.ptr));
+            name_label.as(gtk.Widget).addCssClass("cmux-ws-name");
+            name_label.as(gtk.Widget).setHalign(.start);
+            name_label.as(gtk.Widget).setHexpand(1);
+            name_label.setEllipsize(.end);
+            top_hbox.append(name_label.as(gtk.Widget));
+
+            const unread = if (notification_store.getGlobal()) |s| s.unreadCount() else 0;
+            if (unread > 0) {
+                var badge_buf: [8]u8 = undefined;
+                const badge_text = std.fmt.bufPrintZ(&badge_buf, "{d}", .{unread}) catch "!";
+                const badge_label = gtk.Label.new(badge_text);
+                badge_label.as(gtk.Widget).addCssClass("cmux-ws-badge");
+                badge_label.as(gtk.Widget).setHalign(.end);
+                top_hbox.append(badge_label.as(gtk.Widget));
+            }
+
+            row_box.append(top_hbox.as(gtk.Widget));
+
+            // Status entries
+            for (ws.status.statuses.items) |status_entry| {
+                var status_buf: [128]u8 = undefined;
+                const status_text = std.fmt.bufPrintZ(&status_buf, "{s}: {s}", .{
+                    status_entry.key, status_entry.value,
+                }) catch continue;
+                const status_label = gtk.Label.new(status_text);
+                status_label.as(gtk.Widget).addCssClass("cmux-ws-status");
+                status_label.as(gtk.Widget).setHalign(.start);
+                status_label.setEllipsize(.end);
+                row_box.append(status_label.as(gtk.Widget));
+            }
+
+            // Progress bars
+            for (ws.status.progress.items) |prog| {
+                const prog_hbox = gtk.Box.new(.horizontal, 4);
+                const progress_bar = gtk.ProgressBar.new();
+                progress_bar.setFraction(prog.value);
+                progress_bar.as(gtk.Widget).addCssClass("cmux-sidebar-progress");
+                progress_bar.as(gtk.Widget).setHexpand(1);
+                progress_bar.as(gtk.Widget).setValign(.center);
+                prog_hbox.append(progress_bar.as(gtk.Widget));
+
+                var pct_buf: [8]u8 = undefined;
+                const pct_text = std.fmt.bufPrintZ(&pct_buf, "{d}%", .{@as(u32, @intFromFloat(prog.value * 100))}) catch "";
+                if (pct_text.len > 0) {
+                    const pct_label = gtk.Label.new(pct_text);
+                    pct_label.as(gtk.Widget).addCssClass("cmux-ws-progress-label");
+                    prog_hbox.append(pct_label.as(gtk.Widget));
+                }
+                row_box.append(prog_hbox.as(gtk.Widget));
+            }
+
+            // Latest log
+            if (ws.status.logs.items.len > 0) {
+                const last_log = ws.status.logs.items[ws.status.logs.items.len - 1];
+                var log_buf: [96]u8 = undefined;
+                const log_text = std.fmt.bufPrintZ(&log_buf, "\xE2\x96\xB8 {s}", .{last_log.message}) catch "";
+                if (log_text.len > 0) {
+                    const log_label = gtk.Label.new(log_text);
+                    log_label.as(gtk.Widget).addCssClass("cmux-ws-log");
+                    log_label.as(gtk.Widget).setHalign(.start);
+                    log_label.setEllipsize(.end);
+                    row_box.append(log_label.as(gtk.Widget));
+                }
+            }
+
+            // Ports
+            const ports = port_scanner.getPorts();
+            if (ports.len > 0) {
+                var ports_buf: [128]u8 = undefined;
+                var ports_len: usize = 0;
+                const max_show: usize = 4;
+                for (ports[0..@min(ports.len, max_show)]) |p| {
+                    if (ports_len > 0) {
+                        if (ports_len < ports_buf.len - 1) {
+                            ports_buf[ports_len] = ' ';
+                            ports_len += 1;
+                        }
+                    }
+                    const written = std.fmt.bufPrint(ports_buf[ports_len..], ":{d}", .{p.port}) catch break;
+                    ports_len += written.len;
+                }
+                if (ports.len > max_show) {
+                    const more = std.fmt.bufPrint(ports_buf[ports_len..], " +{d}", .{ports.len - max_show}) catch "";
+                    ports_len += more.len;
+                }
+                if (ports_len > 0) {
+                    ports_buf[@min(ports_len, ports_buf.len - 1)] = 0;
+                    const ports_label = gtk.Label.new(@ptrCast(&ports_buf));
+                    ports_label.as(gtk.Widget).addCssClass("cmux-ws-ports");
+                    ports_label.as(gtk.Widget).setHalign(.start);
+                    ports_label.setEllipsize(.end);
+                    row_box.append(ports_label.as(gtk.Widget));
+                }
+            }
+
+            sidebar_list.append(row_box.as(gtk.Widget));
+        }
+
+        return 1; // Keep timer
     }
 
     /// Winproto backend for this window.
