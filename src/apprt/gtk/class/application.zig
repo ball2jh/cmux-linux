@@ -18,6 +18,7 @@ const cmux_browser = if (build_config.cmux) @import("../../../cmux/browser/panel
 const cmux_auth = if (build_config.cmux) @import("../../../cmux/socket/auth.zig") else struct {};
 const cmux_ports = if (build_config.cmux) @import("../../../cmux/workspace/port_scanner.zig") else struct {};
 const cmux_markdown = if (build_config.cmux) @import("../../../cmux/markdown/panel.zig") else struct {};
+const cmux_git = if (build_config.cmux) @import("../../../cmux/workspace/git_info.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -457,6 +458,7 @@ pub const Application = extern struct {
             cmux_browser.deinitGlobal();
             cmux_ports.deinitGlobal();
             cmux_markdown.deinitGlobal();
+            cmux_git.deinitGlobal();
         }
 
         priv.config.unref();
@@ -1340,6 +1342,7 @@ pub const Application = extern struct {
             };
             cmux_browser.initGlobal(self.allocator());
             cmux_markdown.initGlobal(self.allocator());
+            cmux_git.initGlobal(self.allocator());
             // Default to automation mode (same-user access) for now.
             // cmuxOnly requires processes to be descendants, which blocks
             // external tools like `cmux +ctl`. Use automation as default.

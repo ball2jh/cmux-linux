@@ -35,6 +35,9 @@ const log = std.log.scoped(.gtk_ghostty_window);
 // cmux: module-level sidebar state for dynamic refresh
 var cmux_sidebar_listbox: ?*gtk.ListBox = null;
 var cmux_sidebar_timer: c_uint = 0;
+var cmux_sidebar_stack: ?*gtk.Stack = null;
+var cmux_sidebar_paned: ?*gtk.Paned = null;
+var cmux_sidebar_visible: bool = true;
 
 pub const Window = extern struct {
     const Self = @This();
@@ -545,6 +548,13 @@ pub const Window = extern struct {
         notif_btn.as(gtk.Widget).addCssClass("cmux-sidebar-tab");
         notif_btn.as(gtk.Widget).setHexpand(1);
 
+        // Sidebar toggle (hide/show) button
+        const toggle_sidebar_btn = gtk.Button.newFromIconName("sidebar-show-symbolic");
+        toggle_sidebar_btn.as(gtk.Widget).addCssClass("cmux-sidebar-toggle");
+        toggle_sidebar_btn.as(gtk.Widget).setTooltipText("Toggle Sidebar");
+        _ = gtk.Button.signals.clicked.connect(toggle_sidebar_btn, *gtk.Button, &cmuxToggleSidebarClicked, toggle_sidebar_btn, .{});
+
+        header_box.append(toggle_sidebar_btn.as(gtk.Widget));
         header_box.append(ws_btn.as(gtk.Widget));
         header_box.append(notif_btn.as(gtk.Widget));
         sidebar_container.append(header_box.as(gtk.Widget));
@@ -627,8 +637,16 @@ pub const Window = extern struct {
         notif_scrolled.setChild(notif_box.as(gtk.Widget));
         _ = stack.addNamed(notif_scrolled.as(gtk.Widget), "notifications");
 
-        // Set initial page
+        // Set initial page and store reference
         stack.setVisibleChildName("workspaces");
+        cmux_sidebar_stack = stack;
+
+        // Connect toggle buttons to switch stack pages
+        _ = gtk.ToggleButton.signals.toggled.connect(ws_btn, *gtk.Stack, &cmuxWsTabToggled, stack, .{});
+        _ = gtk.ToggleButton.signals.toggled.connect(notif_btn, *gtk.Stack, &cmuxNotifTabToggled, stack, .{});
+
+        // Connect ListBox row selection to switch active workspace
+        _ = gtk.ListBox.signals.row_selected.connect(sidebar, *gtk.ListBox, &cmuxWorkspaceRowSelected, sidebar, .{});
 
         sidebar_container.append(stack.as(gtk.Widget));
 
@@ -646,6 +664,7 @@ pub const Window = extern struct {
         paned.setPosition(200);
         paned.setShrinkStartChild(0);
         paned.setResizeStartChild(0);
+        cmux_sidebar_paned = paned;
 
         // Add paned to the parent box where toast_overlay was
         const parent_box: *gtk.Box = @ptrCast(@alignCast(parent_widget));
@@ -702,6 +721,25 @@ pub const Window = extern struct {
             }
 
             row_box.append(top_hbox.as(gtk.Widget));
+
+            // Git branch info (detected from terminal PWD)
+            const git_info = @import("../../../cmux/workspace/git_info.zig");
+            // Try to get branch from home dir as fallback
+            const home = std.posix.getenv("HOME") orelse "/home";
+            if (git_info.getCachedBranch(home)) |branch| {
+                var branch_buf: [64]u8 = undefined;
+                const branch_text = std.fmt.bufPrintZ(&branch_buf, "\xE2\x8E\x87 {s}", .{branch}) catch "";
+                if (branch_text.len > 0) {
+                    const branch_label = gtk.Label.new(branch_text);
+                    branch_label.as(gtk.Widget).addCssClass("cmux-ws-branch");
+                    branch_label.as(gtk.Widget).setHalign(.start);
+                    branch_label.setEllipsize(.end);
+                    row_box.append(branch_label.as(gtk.Widget));
+                }
+            } else {
+                // Trigger async branch detection for next refresh
+                git_info.refreshBranch(home);
+            }
 
             // Status entries
             for (ws.status.statuses.items) |status_entry| {
@@ -784,6 +822,45 @@ pub const Window = extern struct {
         }
 
         return 1; // Keep timer
+    }
+
+    /// Toggle sidebar visibility.
+    fn cmuxToggleSidebarClicked(_: *gtk.Button, _: *gtk.Button) callconv(.c) void {
+        const paned_w = cmux_sidebar_paned orelse return;
+        if (cmux_sidebar_visible) {
+            paned_w.setPosition(0);
+            cmux_sidebar_visible = false;
+        } else {
+            paned_w.setPosition(200);
+            cmux_sidebar_visible = true;
+        }
+    }
+
+    /// Workspaces tab toggled — show workspaces page.
+    fn cmuxWsTabToggled(_: *gtk.ToggleButton, stack: *gtk.Stack) callconv(.c) void {
+        stack.setVisibleChildName("workspaces");
+    }
+
+    /// Notifications tab toggled — show notifications page.
+    fn cmuxNotifTabToggled(_: *gtk.ToggleButton, stack: *gtk.Stack) callconv(.c) void {
+        stack.setVisibleChildName("notifications");
+    }
+
+    /// Workspace row selected — switch active workspace.
+    fn cmuxWorkspaceRowSelected(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, _: *gtk.ListBox) callconv(.c) void {
+        const selected_row = row orelse return;
+        const index = selected_row.getIndex();
+        if (index < 0) return;
+
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const mgr = cmux_ws.getGlobal() orelse return;
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+
+        const idx: usize = @intCast(index);
+        if (idx < mgr.workspaces.items.len) {
+            mgr.active_id = mgr.workspaces.items[idx].id;
+        }
     }
 
     /// Winproto backend for this window.

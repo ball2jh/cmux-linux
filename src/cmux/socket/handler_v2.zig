@@ -159,7 +159,7 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "browser.snapshot")) {
         v2BrowserSnapshot(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.get.title")) {
-        respondOkString(alloc, client_fd, id, "");
+        v2BrowserGetTitle(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.focus_webview")) {
         respondOkString(alloc, client_fd, id, "ok");
     } else if (std.mem.eql(u8, method, "browser.is_webview_focused")) {
@@ -936,6 +936,23 @@ fn v2DebugTerminals(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value
     writer.writeAll("]") catch return;
 
     respondOkRaw(alloc, client_fd, id, buf.items);
+}
+
+fn v2BrowserGetTitle(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            if (webkit.getTitle(w)) |title| {
+                respondOkString(alloc, client_fd, id, std.mem.sliceTo(title, 0));
+            } else {
+                respondOkString(alloc, client_fd, id, "");
+            }
+            return;
+        }
+    }
+    respondOkString(alloc, client_fd, id, "");
 }
 
 fn v2BrowserGeolocationSet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {

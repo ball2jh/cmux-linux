@@ -15,6 +15,7 @@ pub const notification = @import("notification/store.zig");
 pub const workspace = @import("workspace/manager.zig");
 pub const workspace_status = @import("workspace/status.zig");
 pub const port_scanner = @import("workspace/port_scanner.zig");
+pub const git_info = @import("workspace/git_info.zig");
 pub const session = @import("session/persistence.zig");
 pub const browser = @import("browser/panel.zig");
 pub const markdown = @import("markdown/panel.zig");
