@@ -17,6 +17,8 @@ const gtk = @import("gtk");
 const gobject = @import("gobject");
 
 const workspace_mgr = @import("../workspace/manager.zig");
+const Window = @import("../../apprt/gtk/class/window.zig").Window;
+const Tab = @import("../../apprt/gtk/class/tab.zig").Tab;
 
 const log = std.log.scoped(.cmux_session);
 
@@ -119,7 +121,7 @@ pub fn save() void {
     }
 
     writer.print(
-        \\{{"version":1,"active_workspace_id":{d},"window_width":{d},"window_height":{d},"workspaces":[
+        \\{{"version":2,"active_workspace_id":{d},"window_width":{d},"window_height":{d},"workspaces":[
     , .{ mgr.activeId(), win_width, win_height }) catch return;
 
     mgr.mutex.lock();
@@ -131,7 +133,42 @@ pub fn save() void {
         writer.print("{d}", .{ws.id}) catch return;
         writer.writeAll(",\"name\":\"") catch return;
         writeJsonEscaped(writer, ws.name);
-        writer.writeAll("\",\"tabs\":[]}") catch return;
+        writer.writeAll("\",\"tabs\":[") catch return;
+
+        // Capture real tab state from the GTK window
+        if (app.getActiveWindow()) |gtk_win| {
+            if (gobject.ext.cast(Window, gtk_win)) |window| {
+                const tab_view = window.getTabView();
+                const n: usize = @intCast(@max(0, tab_view.getNPages()));
+                var t: usize = 0;
+                while (t < n) : (t += 1) {
+                    const page = tab_view.getNthPage(@intCast(t));
+                    const child = page.getChild();
+                    if (gobject.ext.cast(Tab, child)) |tab| {
+                        if (t > 0) writer.writeAll(",") catch return;
+                        writer.writeAll("{") catch return;
+
+                        // Get title from the page
+                        writer.writeAll("\"title\":\"") catch return;
+                        writeJsonEscaped(writer, std.mem.sliceTo(page.getTitle(), 0));
+                        writer.writeAll("\"") catch return;
+
+                        // Get pwd from the active surface
+                        if (tab.getActiveSurface()) |surface| {
+                            if (surface.getPwd()) |pwd| {
+                                writer.writeAll(",\"pwd\":\"") catch return;
+                                writeJsonEscaped(writer, pwd);
+                                writer.writeAll("\"") catch return;
+                            }
+                        }
+
+                        writer.writeAll("}") catch return;
+                    }
+                }
+            }
+        }
+
+        writer.writeAll("]}") catch return;
     }
 
     writer.writeAll("]}\n") catch return;
