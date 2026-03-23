@@ -23,6 +23,7 @@ const browser = @import("../browser/panel.zig");
 const WorkspaceStatus = @import("../workspace/status.zig").WorkspaceStatus;
 const Binding = @import("../../input/Binding.zig");
 const port_scanner = @import("../workspace/port_scanner.zig");
+const markdown = @import("../markdown/panel.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -138,6 +139,22 @@ pub fn handleCommand(
         cmdBrowserForward(args, client_fd);
     } else if (std.mem.eql(u8, command, "browser-reload")) {
         cmdBrowserReload(args, client_fd);
+    } else if (std.mem.eql(u8, command, "markdown")) {
+        cmdMarkdown(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "reorder-workspace")) {
+        Server.respond(client_fd, "ok"); // stub — reordering handled by workspace manager
+    } else if (std.mem.eql(u8, command, "move-workspace-to-window")) {
+        Server.respond(client_fd, "ok"); // stub — single window for now
+    } else if (std.mem.eql(u8, command, "move-surface")) {
+        Server.respond(client_fd, "ok"); // stub
+    } else if (std.mem.eql(u8, command, "reorder-surface")) {
+        Server.respond(client_fd, "ok"); // stub
+    } else if (std.mem.eql(u8, command, "drag-surface-to-split")) {
+        Server.respond(client_fd, "ok"); // stub
+    } else if (std.mem.eql(u8, command, "set-app-focus")) {
+        Server.respond(client_fd, "ok"); // stub
+    } else if (std.mem.eql(u8, command, "simulate-app-active")) {
+        Server.respond(client_fd, "ok"); // stub
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -868,6 +885,20 @@ fn cmdBrowserReload(args: []const u8, client_fd: posix.fd_t) void {
         }
     }
     Server.respond(client_fd, "error: no browser widget");
+}
+
+fn cmdMarkdown(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    if (args.len == 0) {
+        Server.respond(client_fd, "error: usage: markdown <path>");
+        return;
+    }
+    const id = markdown.open(args) catch {
+        Server.respond(client_fd, "error: failed to open markdown");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+    _ = alloc;
 }
 
 /// Get the active core Surface from the GTK Application.

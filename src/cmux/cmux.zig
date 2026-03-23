@@ -17,6 +17,7 @@ pub const workspace_status = @import("workspace/status.zig");
 pub const port_scanner = @import("workspace/port_scanner.zig");
 pub const session = @import("session/persistence.zig");
 pub const browser = @import("browser/panel.zig");
+pub const markdown = @import("markdown/panel.zig");
 
 test {
     if (comptime build_config.cmux) {

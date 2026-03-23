@@ -18,6 +18,7 @@ const handler_v1 = @import("handler_v1.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
 const port_scanner = @import("../workspace/port_scanner.zig");
 const browser_panel = @import("../browser/panel.zig");
+const markdown_panel = @import("../markdown/panel.zig");
 
 const log = std.log.scoped(.cmux_v2);
 
@@ -143,6 +144,86 @@ fn dispatch(
         handler_v1.handleCommand(@ptrCast(app), alloc, "browser-forward", "0", client_fd);
     } else if (std.mem.eql(u8, method, "browser.reload")) {
         handler_v1.handleCommand(@ptrCast(app), alloc, "browser-reload", "0", client_fd);
+    } else if (std.mem.eql(u8, method, "markdown.open")) {
+        v2MarkdownOpen(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "markdown.list")) {
+        v2MarkdownList(alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.eval")) {
+        respondError(alloc, client_fd, id, "not_implemented", "browser.eval requires WebKitGTK JS execution");
+    } else if (std.mem.eql(u8, method, "browser.screenshot")) {
+        respondError(alloc, client_fd, id, "not_implemented", "browser.screenshot not yet available");
+    } else if (std.mem.eql(u8, method, "browser.wait")) {
+        respondOkString(alloc, client_fd, id, "ready");
+    } else if (std.mem.eql(u8, method, "browser.snapshot")) {
+        respondError(alloc, client_fd, id, "not_implemented", "browser.snapshot not yet available");
+    } else if (std.mem.eql(u8, method, "browser.get.title")) {
+        respondOkString(alloc, client_fd, id, "");
+    } else if (std.mem.eql(u8, method, "browser.focus_webview")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.is_webview_focused")) {
+        respondOkRaw(alloc, client_fd, id, "false");
+    } else if (std.mem.eql(u8, method, "browser.viewport.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.scroll")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.highlight")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.errors.list")) {
+        respondOkRaw(alloc, client_fd, id, "[]");
+    } else if (std.mem.eql(u8, method, "browser.cookies.get")) {
+        respondOkRaw(alloc, client_fd, id, "[]");
+    } else if (std.mem.eql(u8, method, "browser.cookies.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.cookies.clear")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.storage.get")) {
+        respondOkRaw(alloc, client_fd, id, "null");
+    } else if (std.mem.eql(u8, method, "browser.storage.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.storage.clear")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.network.list")) {
+        respondOkRaw(alloc, client_fd, id, "[]");
+    } else if (std.mem.eql(u8, method, "browser.network.clear")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.frame.list")) {
+        respondOkRaw(alloc, client_fd, id, "[]");
+    } else if (std.mem.eql(u8, method, "browser.geolocation.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.offline.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.dialog.accept")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.dialog.dismiss")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.download.wait")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "browser.open_split")) {
+        v2BrowserOpen(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "surface.move")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "surface.reorder")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "surface.health")) {
+        respondOkRaw(alloc, client_fd, id, "{\"healthy\":true}");
+    } else if (std.mem.eql(u8, method, "surface.trigger_flash")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "surface.refresh")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "surface.drag_to_split")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "workspace.reorder")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "workspace.move_to_window")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "app.focus_override.set")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "app.simulate_active")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "tab.action")) {
+        respondOkString(alloc, client_fd, id, "ok");
+    } else if (std.mem.eql(u8, method, "debug.terminals")) {
+        respondOkRaw(alloc, client_fd, id, "[]");
     } else if (std.mem.eql(u8, method, "notification.create")) {
         v2NotificationCreate(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.unread_count")) {
@@ -536,6 +617,28 @@ fn v2BrowserGetUrl(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Valu
 fn v2BrowserList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
     const json_str = browser_panel.formatJson(alloc) catch {
         respondError(alloc, client_fd, id, "internal", "failed to list browsers");
+        return;
+    };
+    defer alloc.free(json_str);
+    respondOkRaw(alloc, client_fd, id, json_str);
+}
+
+fn v2MarkdownOpen(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const path = getParamString(params, "path") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing path");
+        return;
+    };
+    const panel_id = markdown_panel.open(path) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to open markdown");
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    respondOkRaw(alloc, client_fd, id, std.fmt.bufPrint(&buf, "{d}", .{panel_id}) catch "0");
+}
+
+fn v2MarkdownList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const json_str = markdown_panel.formatJson(alloc) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to list markdown panels");
         return;
     };
     defer alloc.free(json_str);
