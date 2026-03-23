@@ -149,13 +149,13 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "markdown.list")) {
         v2MarkdownList(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.eval")) {
-        respondError(alloc, client_fd, id, "not_implemented", "browser.eval requires WebKitGTK JS execution");
+        v2BrowserEval(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.screenshot")) {
-        respondError(alloc, client_fd, id, "not_implemented", "browser.screenshot not yet available");
+        v2BrowserScreenshot(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.wait")) {
         respondOkString(alloc, client_fd, id, "ready");
     } else if (std.mem.eql(u8, method, "browser.snapshot")) {
-        respondError(alloc, client_fd, id, "not_implemented", "browser.snapshot not yet available");
+        v2BrowserSnapshot(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.get.title")) {
         respondOkString(alloc, client_fd, id, "");
     } else if (std.mem.eql(u8, method, "browser.focus_webview")) {
@@ -621,6 +621,60 @@ fn v2BrowserList(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) v
     };
     defer alloc.free(json_str);
     respondOkRaw(alloc, client_fd, id, json_str);
+}
+
+fn v2BrowserEval(alloc: Allocator, params: ?std.json.Value, _: ?std.json.Value, client_fd: posix.fd_t) void {
+    const script = getParamString(params, "script") orelse getParamString(params, "code") orelse {
+        respondError(alloc, client_fd, null, "invalid_params", "missing script");
+        return;
+    };
+    const panel_id = getParamInt(params, "id") orelse 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            // Null-terminate the script
+            const script_z = alloc.dupeZ(u8, script) catch {
+                respondError(alloc, client_fd, null, "internal", "alloc failed");
+                return;
+            };
+            defer alloc.free(script_z);
+            // This is async — the callback writes the response directly to client_fd
+            webkit.evaluateJavaScript(w, script_z, alloc, client_fd);
+            return;
+        }
+    }
+    respondError(alloc, client_fd, null, "no_browser", "no browser widget for panel");
+}
+
+fn v2BrowserScreenshot(alloc: Allocator, params: ?std.json.Value, _: ?std.json.Value, client_fd: posix.fd_t) void {
+    const panel_id = getParamInt(params, "id") orelse 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.getSnapshot(w, alloc, client_fd);
+            return;
+        }
+    }
+    respondError(alloc, client_fd, null, "no_browser", "no browser widget for panel");
+}
+
+fn v2BrowserSnapshot(alloc: Allocator, params: ?std.json.Value, _: ?std.json.Value, client_fd: posix.fd_t) void {
+    // DOM snapshot via JS: document.documentElement.outerHTML
+    const panel_id = getParamInt(params, "id") orelse 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.getPageSource(w, alloc, client_fd);
+            return;
+        }
+    }
+    respondError(alloc, client_fd, null, "no_browser", "no browser widget for panel");
 }
 
 fn v2MarkdownOpen(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
