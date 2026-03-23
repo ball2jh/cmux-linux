@@ -19,6 +19,7 @@ const cmux_auth = if (build_config.cmux) @import("../../../cmux/socket/auth.zig"
 const cmux_ports = if (build_config.cmux) @import("../../../cmux/workspace/port_scanner.zig") else struct {};
 const cmux_markdown = if (build_config.cmux) @import("../../../cmux/markdown/panel.zig") else struct {};
 const cmux_git = if (build_config.cmux) @import("../../../cmux/workspace/git_info.zig") else struct {};
+const cmux_agent = if (build_config.cmux) @import("../../../cmux/agent/session.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -459,6 +460,7 @@ pub const Application = extern struct {
             cmux_ports.deinitGlobal();
             cmux_markdown.deinitGlobal();
             cmux_git.deinitGlobal();
+            cmux_agent.deinitGlobal(alloc);
         }
 
         priv.config.unref();
@@ -1348,6 +1350,9 @@ pub const Application = extern struct {
             // external tools like `cmux +ctl`. Use automation as default.
             cmux_auth.init(.automation);
             cmux_ports.initGlobal(self.allocator());
+            cmux_agent.initGlobal(self.allocator()) catch |err| {
+                log.err("failed to init cmux agent session store: {}", .{err});
+            };
             // Restore previous session (workspaces) before starting
             _ = cmux_session.restore(self.allocator());
             self.startupCmuxSocket();

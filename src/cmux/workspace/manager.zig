@@ -139,6 +139,33 @@ pub const Manager = struct {
         return false;
     }
 
+    /// Reorder a workspace to a new index position.
+    pub fn reorder(self: *Manager, id: u64, new_index: usize) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Find current index
+        var old_index: ?usize = null;
+        for (self.workspaces.items, 0..) |ws, i| {
+            if (ws.id == id) {
+                old_index = i;
+                break;
+            }
+        }
+        const from = old_index orelse return false;
+        const to = @min(new_index, if (self.workspaces.items.len > 0) self.workspaces.items.len - 1 else 0);
+        if (from == to) return true;
+
+        // Remove from old position and insert at new
+        const item = self.workspaces.orderedRemove(from);
+        self.workspaces.insertSlice(self.alloc, to, &[_]Workspace{item}) catch {
+            // Re-insert at original position on failure
+            self.workspaces.insertSlice(self.alloc, from, &[_]Workspace{item}) catch {};
+            return false;
+        };
+        return true;
+    }
+
     /// Get the status store for a workspace (must hold mutex or call with lock).
     pub fn getStatus(self: *Manager, id: u64) ?*WorkspaceStatus {
         for (self.workspaces.items) |*ws| {

@@ -21,6 +21,7 @@ const workspace_mgr = @import("../workspace/manager.zig");
 const port_scanner = @import("../workspace/port_scanner.zig");
 const browser_panel = @import("../browser/panel.zig");
 const markdown_panel = @import("../markdown/panel.zig");
+const agent_session = @import("../agent/session.zig");
 
 const log = std.log.scoped(.cmux_v2);
 
@@ -241,6 +242,18 @@ fn dispatch(
         const notification_store = @import("../notification/store.zig");
         if (notification_store.getGlobal()) |store| store.clear(null);
         respondOkString(alloc, client_fd, id, "cleared");
+    } else if (std.mem.eql(u8, method, "agent.session.start") or std.mem.eql(u8, method, "agent.session.active")) {
+        v2AgentSessionStart(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "agent.session.end")) {
+        v2AgentSessionEnd(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "agent.session.idle") or std.mem.eql(u8, method, "agent.session.stop")) {
+        v2AgentSessionIdle(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "agent.prompt_submit")) {
+        v2AgentPromptSubmit(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "agent.pre_tool_use")) {
+        v2AgentPreToolUse(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "agent.notification")) {
+        v2AgentNotification(alloc, params, id, client_fd);
     } else {
         respondError(alloc, client_fd, id, "method_not_found", method);
     }
@@ -1253,4 +1266,168 @@ fn writeJsonEscaped(writer: anytype, s: []const u8) void {
             },
         }
     }
+}
+
+// --- Agent session V2 handlers ---
+
+fn v2AgentSessionStart(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId") orelse "";
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId") orelse "default";
+    const surface_id = getParamString(params, "surface_id") orelse getParamString(params, "surfaceId") orelse "";
+    const cwd = getParamString(params, "cwd");
+    const pid: ?i32 = blk: {
+        if (params) |p| {
+            if (p == .object) {
+                if (p.object.get("pid")) |pid_val| {
+                    if (pid_val == .integer) break :blk @intCast(@max(0, @min(std.math.maxInt(i32), pid_val.integer)));
+                }
+            }
+        }
+        break :blk null;
+    };
+
+    store.upsert(session_id, workspace_id, surface_id, cwd, pid, null, null);
+    handler_v1.setAgentStatus(workspace_id, "Running", "bolt.fill", "#4C8DFF");
+    respondOkString(alloc, client_fd, id, "OK");
+}
+
+fn v2AgentSessionEnd(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId");
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId");
+    const surface_id = getParamString(params, "surface_id") orelse getParamString(params, "surfaceId");
+
+    var record = store.consume(session_id, workspace_id, surface_id) orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+    defer store.freeConsumed(&record);
+
+    handler_v1.clearAgentStatus(record.workspace_id);
+
+    const notification_store = @import("../notification/store.zig");
+    if (notification_store.getGlobal()) |nstore| nstore.clear(null);
+
+    respondOkString(alloc, client_fd, id, "OK");
+}
+
+fn v2AgentSessionIdle(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId") orelse "";
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId") orelse "default";
+
+    var resolved_ws = workspace_id;
+    if (session_id.len > 0) {
+        if (store.lookup(session_id)) |record| {
+            resolved_ws = record.workspace_id;
+            store.upsert(session_id, resolved_ws, "", null, null, "Completed", getParamString(params, "message"));
+        }
+    }
+
+    handler_v1.setAgentStatus(resolved_ws, "Idle", "pause.circle.fill", "#8E8E93");
+    respondOkString(alloc, client_fd, id, "OK");
+}
+
+fn v2AgentPromptSubmit(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId") orelse "";
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId") orelse "default";
+
+    var resolved_ws = workspace_id;
+    if (session_id.len > 0) {
+        if (store.lookup(session_id)) |record| resolved_ws = record.workspace_id;
+    }
+
+    const notification_store = @import("../notification/store.zig");
+    if (notification_store.getGlobal()) |nstore| nstore.clear(null);
+
+    handler_v1.setAgentStatus(resolved_ws, "Running", "bolt.fill", "#4C8DFF");
+    respondOkString(alloc, client_fd, id, "OK");
+}
+
+fn v2AgentPreToolUse(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId") orelse "";
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId") orelse "default";
+    const tool_name = getParamString(params, "tool_name") orelse getParamString(params, "toolName");
+    const description = getParamString(params, "description") orelse getParamString(params, "tool_description");
+
+    var resolved_ws = workspace_id;
+    if (session_id.len > 0) {
+        if (store.lookup(session_id)) |record| resolved_ws = record.workspace_id;
+    }
+
+    // Save AskUserQuestion body
+    if (tool_name) |tn| {
+        if (std.mem.eql(u8, tn, "AskUserQuestion")) {
+            if (session_id.len > 0) {
+                store.upsert(session_id, resolved_ws, "", null, null, null, getParamString(params, "message"));
+            }
+        }
+    }
+
+    const notification_store = @import("../notification/store.zig");
+    if (notification_store.getGlobal()) |nstore| nstore.clear(null);
+
+    const status_text = description orelse "Running";
+    handler_v1.setAgentStatus(resolved_ws, status_text, "bolt.fill", "#4C8DFF");
+    respondOkString(alloc, client_fd, id, "OK");
+}
+
+fn v2AgentNotification(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const store = agent_session.getGlobal() orelse {
+        respondOkString(alloc, client_fd, id, "OK");
+        return;
+    };
+
+    const session_id = getParamString(params, "session_id") orelse getParamString(params, "sessionId") orelse "";
+    const workspace_id = getParamString(params, "workspace_id") orelse getParamString(params, "workspaceId") orelse "default";
+    const surface_id = getParamString(params, "surface_id") orelse getParamString(params, "surfaceId") orelse "";
+    const event_type = getParamString(params, "event") orelse getParamString(params, "event_type");
+    const message = getParamString(params, "message") orelse getParamString(params, "body") orelse "";
+
+    var resolved_ws = workspace_id;
+    if (session_id.len > 0) {
+        if (store.lookup(session_id)) |record| resolved_ws = record.workspace_id;
+    }
+
+    const class = agent_session.classifyEvent(event_type, message);
+    const subtitle = switch (class) {
+        .permission => "Permission requested",
+        .@"error" => "Error occurred",
+        .completed => "Task completed",
+        .waiting => "Waiting for input",
+        .attention => "Needs attention",
+    };
+
+    if (session_id.len > 0) {
+        store.upsert(session_id, resolved_ws, surface_id, null, null, subtitle, message);
+    }
+
+    const notification_store = @import("../notification/store.zig");
+    if (notification_store.getGlobal()) |nstore| nstore.add(subtitle, message, 0);
+
+    handler_v1.setAgentStatus(resolved_ws, "Needs input", "bell.fill", "#4C8DFF");
+    respondOkString(alloc, client_fd, id, "OK");
 }

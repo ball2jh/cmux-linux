@@ -21,6 +21,7 @@ pub const tmux_compat = @import("socket/tmux_compat.zig");
 pub const session = @import("session/persistence.zig");
 pub const browser = @import("browser/panel.zig");
 pub const markdown = @import("markdown/panel.zig");
+pub const agent = @import("agent/session.zig");
 
 test {
     if (comptime build_config.cmux) {
