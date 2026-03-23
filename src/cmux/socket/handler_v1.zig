@@ -79,6 +79,19 @@ pub fn handleCommand(
         cmdNewSplit(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "list-panes")) {
         cmdListPanes(app, alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "rename-tab")) {
+        // Alias for rename-workspace (macOS cmux uses tab = workspace)
+        cmdRenameWorkspace(alloc, args, client_fd);
+    } else if (std.mem.eql(u8, command, "tree")) {
+        cmdTree(app, alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "trigger-flash")) {
+        Server.respond(client_fd, "ok"); // Visual flash — no-op for now
+    } else if (std.mem.eql(u8, command, "new-pane")) {
+        // Alias for new-split (macOS: pane = split direction)
+        cmdNewSplit(app, args, client_fd);
+    } else if (std.mem.eql(u8, command, "focus-pane")) {
+        // Navigate to next/previous pane
+        cmdFocusPane(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "close-surface")) {
         cmdCloseSurface(app, client_fd);
     } else if (std.mem.eql(u8, command, "send-key")) {
@@ -516,6 +529,66 @@ fn cmdCloseTab(app: *gtk.Application) void {
     // Close the active tab's surface
     const surface = getActiveSurface(app) orelse return;
     _ = surface.performBindingAction(.close_surface) catch {};
+}
+
+fn cmdTree(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+    // Dump workspace + tab tree structure as text
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    // Get tab count from active window
+    var tab_count: c_int = 0;
+    if (app.getActiveWindow()) |gtk_win| {
+        if (gobject.ext.cast(Window, gtk_win)) |window| {
+            tab_count = window.getTabView().getNPages();
+        }
+    }
+
+    writer.print("cmux ({d} tabs, {d} workspaces)\n", .{ tab_count, mgr.workspaces.items.len }) catch return;
+    for (mgr.workspaces.items) |ws| {
+        const marker: []const u8 = if (ws.id == mgr.active_id) " *" else "";
+        writer.print("  workspace {d}: \"{s}\"{s}\n", .{ ws.id, ws.name, marker }) catch return;
+        // Status entries
+        for (ws.status.statuses.items) |s| {
+            writer.print("    {s}: {s}\n", .{ s.key, s.value }) catch continue;
+        }
+        // Progress
+        for (ws.status.progress.items) |p| {
+            writer.print("    [{s}: {d:.0}%]\n", .{ p.key, p.value * 100 }) catch continue;
+        }
+    }
+
+    if (buf.items.len > 0) {
+        _ = posix.write(client_fd, buf.items) catch {};
+    } else {
+        Server.respond(client_fd, "");
+    }
+}
+
+fn cmdFocusPane(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "error: no active surface");
+        return;
+    };
+
+    // Parse direction: next (default), previous, right, left, up, down
+    if (args.len == 0 or std.mem.eql(u8, args, "next")) {
+        _ = surface.performBindingAction(.{ .goto_split = .next }) catch {};
+    } else if (std.mem.eql(u8, args, "previous") or std.mem.eql(u8, args, "prev")) {
+        _ = surface.performBindingAction(.{ .goto_split = .previous }) catch {};
+    } else {
+        Server.respond(client_fd, "error: direction must be next or previous");
+        return;
+    }
+    Server.respond(client_fd, "ok");
 }
 
 fn cmdCloseSurface(app: *gtk.Application, client_fd: posix.fd_t) void {

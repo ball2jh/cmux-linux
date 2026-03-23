@@ -95,6 +95,14 @@ fn dispatch(
         handler_v1.handleCommand(@ptrCast(app), alloc, "new-window", "", client_fd);
         // Override the V1 response with JSON
         respondOkString(alloc, client_fd, id, "created");
+    } else if (std.mem.eql(u8, method, "surface.current")) {
+        v2SurfaceCurrent(app, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "pane.create")) {
+        v2SurfaceSplit(app, alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "pane.focus")) {
+        handler_v1.handleCommand(@ptrCast(app), alloc, "focus-pane", getParamString(params, "direction") orelse "next", client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.action")) {
+        v2WorkspaceAction(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.split")) {
         v2SurfaceSplit(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.send_text")) {
@@ -223,6 +231,59 @@ fn v2ListNotifications(alloc: Allocator, id: ?std.json.Value, client_fd: posix.f
     writer.writeAll("]") catch return;
 
     respondOkRaw(alloc, client_fd, id, buf.items);
+}
+
+fn v2SurfaceCurrent(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    if (handler_v1.getActiveSurface(app)) |surface| {
+        var buf: [64]u8 = undefined;
+        respondOkRaw(alloc, client_fd, id, std.fmt.bufPrint(&buf, "{d}", .{@intFromPtr(surface)}) catch "null");
+    } else {
+        respondOkRaw(alloc, client_fd, id, "null");
+    }
+}
+
+fn v2WorkspaceAction(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const action_str = getParamString(params, "action") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing action (next/previous/last)");
+        return;
+    };
+
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+
+    if (mgr.workspaces.items.len == 0) {
+        respondError(alloc, client_fd, id, "no_workspaces", "no workspaces available");
+        return;
+    }
+
+    // Find current workspace index
+    var current_idx: usize = 0;
+    for (mgr.workspaces.items, 0..) |ws, i| {
+        if (ws.id == mgr.active_id) {
+            current_idx = i;
+            break;
+        }
+    }
+
+    var target_idx = current_idx;
+    if (std.mem.eql(u8, action_str, "next")) {
+        target_idx = (current_idx + 1) % mgr.workspaces.items.len;
+    } else if (std.mem.eql(u8, action_str, "previous") or std.mem.eql(u8, action_str, "prev")) {
+        target_idx = if (current_idx == 0) mgr.workspaces.items.len - 1 else current_idx - 1;
+    } else if (std.mem.eql(u8, action_str, "last")) {
+        target_idx = mgr.workspaces.items.len - 1;
+    } else {
+        respondError(alloc, client_fd, id, "invalid_params", "action must be next/previous/last");
+        return;
+    }
+
+    mgr.active_id = mgr.workspaces.items[target_idx].id;
+    respondOkString(alloc, client_fd, id, "switched");
 }
 
 fn v2WindowCurrent(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
