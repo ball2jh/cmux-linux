@@ -832,16 +832,72 @@ fn cmdOpenBrowser(args: []const u8, client_fd: posix.fd_t) void {
         return;
     };
 
-    // Embed the browser widget in the window if available
+    // Embed the browser widget in the active window's tab as a Paned split
     if (browser.getWidget(id)) |browser_widget| {
-        // Make it visible and give it a minimum size
-        browser_widget.setSizeRequest(400, 300);
+        browser_widget.setSizeRequest(400, -1);
         browser_widget.setVisible(1);
 
-        // The browser widget is created and managed by the panel module.
-        // Visual embedding in the window requires extending Ghostty's
-        // SplitTree to support non-Surface children, which is tracked
-        // as future work. The widget is accessible via browser.getWidget().
+        // Get the active window from the default GIO application
+        const gio_app = gio.Application.getDefault() orelse {
+            var buf2: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf2, "{d}", .{id}) catch "0");
+            return;
+        };
+        const gtk_app = gobject.ext.cast(gtk.Application, gio_app) orelse {
+            var buf2: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf2, "{d}", .{id}) catch "0");
+            return;
+        };
+        const active_win = gtk_app.getActiveWindow() orelse {
+            var buf: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+            return;
+        };
+        const window = gobject.ext.cast(Window, active_win) orelse {
+            var buf: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+            return;
+        };
+
+        // Get the active tab's split tree widget
+        const tab_view = window.getTabView();
+        const selected_page = tab_view.getSelectedPage() orelse {
+            var buf: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+            return;
+        };
+        const tab_child = selected_page.getChild();
+
+        // The tab_child is a GhosttyTab (gtk.Box). Its first child is
+        // the GhosttySplitTree. We insert a Paned wrapping both.
+        const first_child = tab_child.getFirstChild() orelse {
+            var buf: [64]u8 = undefined;
+            Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
+            return;
+        };
+
+        // Create a scrolled window for the browser
+        const browser_scroll = gtk.ScrolledWindow.new();
+        browser_scroll.setChild(browser_widget);
+
+        // Create a Paned: terminal | browser
+        const paned = gtk.Paned.new(.horizontal);
+        paned.as(gtk.Widget).setHexpand(1);
+        paned.as(gtk.Widget).setVexpand(1);
+
+        // Reparent: remove split_tree from tab, put in paned
+        first_child.unparent();
+        paned.setStartChild(first_child);
+        paned.setEndChild(browser_scroll.as(gtk.Widget));
+
+        // Set initial position (60/40 split)
+        paned.setPosition(600);
+
+        // Add paned to the tab box
+        const tab_box: *gtk.Box = @ptrCast(@alignCast(tab_child));
+        tab_box.prepend(paned.as(gtk.Widget));
+
+        log.debug("browser panel embedded in active tab as horizontal split", .{});
     }
 
     var buf: [64]u8 = undefined;
