@@ -108,7 +108,8 @@ pub const Server = struct {
         std.fs.deleteFileAbsolute(self.socket_path) catch {};
 
         // Create Unix domain socket
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
+        // No NONBLOCK on listen socket — GLib IOChannel manages async events
+        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
         errdefer posix.close(fd);
 
         // Bind to the path
@@ -229,8 +230,15 @@ pub const Server = struct {
             return 0;
         }
 
+        // Hard cap on total buffer size to prevent OOM from malicious clients
+        if (client.buf.items.len + n > 64 * 1024) {
+            log.warn("client buffer exceeded 64KB limit, dropping connection", .{});
+            self.removeClient(client_fd);
+            return 0;
+        }
+
         client.buf.appendSlice(self.alloc, buf[0..n]) catch {
-            log.warn("client buffer overflow, dropping connection", .{});
+            log.warn("client buffer alloc failed, dropping connection", .{});
             self.removeClient(client_fd);
             return 0;
         };

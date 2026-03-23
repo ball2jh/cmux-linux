@@ -81,7 +81,20 @@ pub fn formatJson(alloc: Allocator) ![]u8 {
     try writer.writeAll("[");
     for (panels.items, 0..) |panel, i| {
         if (i > 0) try writer.writeAll(",");
-        try writer.print("{{\"id\":{d},\"path\":\"{s}\"}}", .{ i, panel.path });
+        try writer.writeAll("{\"id\":");
+        try writer.print("{d}", .{i});
+        try writer.writeAll(",\"path\":\"");
+        // JSON-escape the path
+        for (panel.path) |ch| {
+            switch (ch) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\t' => try writer.writeAll("\\t"),
+                else => try writer.writeByte(ch),
+            }
+        }
+        try writer.writeAll("\"}");
     }
     try writer.writeAll("]");
     return try buf.toOwnedSlice(alloc);

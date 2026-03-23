@@ -153,6 +153,8 @@ fn evalCallback(
         } else {
             Server.respond(ctx.fd, "null");
         }
+        // Free the JSCValue to prevent memory leak
+        c.g_object_unref(@ptrCast(jsc_value));
     } else {
         Server.respond(ctx.fd, "null");
     }

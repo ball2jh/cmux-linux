@@ -638,6 +638,9 @@ fn cmdCloseSurface(app: *gtk.Application, client_fd: posix.fd_t) void {
 
 // --- Status/Progress/Log commands ---
 
+/// Get the active workspace's status store.
+/// Safe because all socket handler callbacks run on the GTK main thread
+/// (GLib main loop), same thread that modifies workspace state.
 fn getActiveWsStatus() ?*WorkspaceStatus {
     const mgr = workspace_mgr.getGlobal() orelse return null;
     mgr.mutex.lock();
