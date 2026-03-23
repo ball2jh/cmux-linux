@@ -519,11 +519,111 @@ pub const Window = extern struct {
             }
         }
 
-        // Create a scrolled window for the sidebar
-        const scrolled = gtk.ScrolledWindow.new();
-        scrolled.setChild(sidebar_widget);
-        scrolled.as(gtk.Widget).setSizeRequest(200, -1);
-        scrolled.setPolicy(.never, .automatic);
+        // === Build sidebar container: header + stack (workspaces | notifications) ===
+        const sidebar_container = gtk.Box.new(.vertical, 0);
+        sidebar_container.as(gtk.Widget).setSizeRequest(200, -1);
+        sidebar_container.as(gtk.Widget).addCssClass("cmux-sidebar-container");
+
+        // --- Sidebar header with toggle buttons ---
+        const header_box = gtk.Box.new(.horizontal, 0);
+        header_box.as(gtk.Widget).addCssClass("cmux-sidebar-header");
+
+        const ws_btn = gtk.ToggleButton.newWithLabel("Workspaces");
+        ws_btn.as(gtk.Widget).addCssClass("cmux-sidebar-tab");
+        ws_btn.as(gtk.Widget).addCssClass("active");
+        ws_btn.as(gtk.Widget).setHexpand(1);
+        ws_btn.setActive(1);
+
+        const notif_btn = gtk.ToggleButton.newWithLabel("Notifications");
+        notif_btn.as(gtk.Widget).addCssClass("cmux-sidebar-tab");
+        notif_btn.as(gtk.Widget).setHexpand(1);
+
+        header_box.append(ws_btn.as(gtk.Widget));
+        header_box.append(notif_btn.as(gtk.Widget));
+        sidebar_container.append(header_box.as(gtk.Widget));
+
+        // --- Stack with two pages ---
+        const stack = gtk.Stack.new();
+        stack.as(gtk.Widget).setHexpand(1);
+        stack.as(gtk.Widget).setVexpand(1);
+
+        // Page 1: Workspaces (scrolled)
+        const ws_scrolled = gtk.ScrolledWindow.new();
+        ws_scrolled.setChild(sidebar_widget);
+        ws_scrolled.setPolicy(.never, .automatic);
+        _ = stack.addNamed(ws_scrolled.as(gtk.Widget), "workspaces");
+
+        // Page 2: Notifications
+        const notif_scrolled = gtk.ScrolledWindow.new();
+        notif_scrolled.setPolicy(.never, .automatic);
+        const notif_box = gtk.Box.new(.vertical, 8);
+        notif_box.as(gtk.Widget).addCssClass("cmux-notification-panel");
+        notif_box.as(gtk.Widget).setMarginTop(8);
+        notif_box.as(gtk.Widget).setMarginStart(8);
+        notif_box.as(gtk.Widget).setMarginEnd(8);
+
+        // Build notification entries
+        if (notification_store.getGlobal()) |store| {
+            store.mutex.lock();
+            defer store.mutex.unlock();
+
+            if (store.entries.items.len == 0) {
+                // Empty state
+                const empty_label = gtk.Label.new("No notifications");
+                empty_label.as(gtk.Widget).addCssClass("cmux-notification-empty");
+                notif_box.append(empty_label.as(gtk.Widget));
+            } else {
+                for (store.entries.items) |entry| {
+                    const notif_row = gtk.Box.new(.horizontal, 8);
+                    notif_row.as(gtk.Widget).addCssClass("cmux-notification-row");
+
+                    // Unread dot (8px)
+                    if (!entry.read) {
+                        const dot = gtk.Label.new("");
+                        dot.as(gtk.Widget).addCssClass("cmux-notification-unread-dot");
+                        dot.as(gtk.Widget).setValign(.start);
+                        dot.as(gtk.Widget).setMarginTop(6);
+                        notif_row.append(dot.as(gtk.Widget));
+                    }
+
+                    // Content column
+                    const content_box = gtk.Box.new(.vertical, 4);
+                    content_box.as(gtk.Widget).setHexpand(1);
+
+                    // Title
+                    var title_buf: [128]u8 = undefined;
+                    const title_z = std.fmt.bufPrintZ(&title_buf, "{s}", .{entry.title}) catch "";
+                    const title_label = gtk.Label.new(title_z);
+                    title_label.as(gtk.Widget).addCssClass("cmux-notification-title");
+                    title_label.as(gtk.Widget).setHalign(.start);
+                    title_label.setEllipsize(.end);
+                    content_box.append(title_label.as(gtk.Widget));
+
+                    // Body
+                    if (entry.body.len > 0) {
+                        var body_buf: [256]u8 = undefined;
+                        const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{entry.body}) catch "";
+                        const body_label = gtk.Label.new(body_z);
+                        body_label.as(gtk.Widget).addCssClass("cmux-notification-body");
+                        body_label.as(gtk.Widget).setHalign(.start);
+                        body_label.setEllipsize(.end);
+                        body_label.setLines(3);
+                        content_box.append(body_label.as(gtk.Widget));
+                    }
+
+                    notif_row.append(content_box.as(gtk.Widget));
+                    notif_box.append(notif_row.as(gtk.Widget));
+                }
+            }
+        }
+
+        notif_scrolled.setChild(notif_box.as(gtk.Widget));
+        _ = stack.addNamed(notif_scrolled.as(gtk.Widget), "notifications");
+
+        // Set initial page
+        stack.setVisibleChildName("workspaces");
+
+        sidebar_container.append(stack.as(gtk.Widget));
 
         // Create a paned: sidebar | content
         const paned = gtk.Paned.new(.horizontal);
@@ -534,7 +634,7 @@ pub const Window = extern struct {
         toast_widget.unparent();
 
         // Set up the paned children
-        paned.setStartChild(scrolled.as(gtk.Widget));
+        paned.setStartChild(sidebar_container.as(gtk.Widget));
         paned.setEndChild(toast_widget);
         paned.setPosition(200);
         paned.setShrinkStartChild(0);
@@ -544,7 +644,7 @@ pub const Window = extern struct {
         const parent_box: *gtk.Box = @ptrCast(@alignCast(parent_widget));
         parent_box.append(paned_widget);
 
-        log.info("cmux workspace sidebar initialized", .{});
+        log.info("cmux workspace sidebar initialized with notification panel", .{});
     }
 
     /// Winproto backend for this window.
