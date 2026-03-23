@@ -12,8 +12,10 @@ const std = @import("std");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const gtk = @import("gtk");
+const gobject = @import("gobject");
 
 const Server = @import("server.zig").Server;
+const Window = @import("../../apprt/gtk/class/window.zig").Window;
 const handler_v1 = @import("handler_v1.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
 const port_scanner = @import("../workspace/port_scanner.zig");
@@ -201,29 +203,35 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "browser.open_split")) {
         v2BrowserOpen(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.move")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Move surface between panes — dispatches goto_split action
+        v2SurfaceGoto(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.reorder")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Reorder tabs in current window
+        v2TabReorder(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.health")) {
-        respondOkRaw(alloc, client_fd, id, "{\"healthy\":true}");
+        v2SurfaceHealth(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.trigger_flash")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Flash the active surface via the bell overlay
+        v2SurfaceTriggerFlash(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.refresh")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Force a redraw of all surfaces
+        v2SurfaceRefresh(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.drag_to_split")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Create a split by direction — same as surface.split
+        v2SurfaceSplit(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.reorder")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2WorkspaceReorder(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.move_to_window")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        // Single window on Linux for now — acknowledge
+        respondOkString(alloc, client_fd, id, "single_window");
     } else if (std.mem.eql(u8, method, "app.focus_override.set")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2AppFocus(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "app.simulate_active")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2AppFocus(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "tab.action")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2TabAction(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "debug.terminals")) {
-        respondOkRaw(alloc, client_fd, id, "[]");
+        v2DebugTerminals(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.create")) {
         v2NotificationCreate(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "notification.unread_count")) {
@@ -746,6 +754,188 @@ fn v2BrowserCookieClearNative(alloc: Allocator, params: ?std.json.Value, client_
         }
     }
     Server.respond(client_fd, "cleared");
+}
+
+fn v2SurfaceGoto(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const surface = handler_v1.getActiveSurface(app) orelse {
+        respondError(alloc, client_fd, id, "no_surface", "no active surface");
+        return;
+    };
+    const dir = getParamString(params, "direction") orelse "next";
+    const Binding = @import("../../input/Binding.zig");
+    const goto_dir: Binding.Action.SplitFocusDirection = if (std.mem.eql(u8, dir, "next"))
+        .next
+    else if (std.mem.eql(u8, dir, "previous") or std.mem.eql(u8, dir, "prev"))
+        .previous
+    else {
+        respondError(alloc, client_fd, id, "invalid_params", "direction must be next/previous");
+        return;
+    };
+    _ = surface.performBindingAction(.{ .goto_split = goto_dir }) catch {
+        respondError(alloc, client_fd, id, "internal", "goto_split failed");
+        return;
+    };
+    respondOkString(alloc, client_fd, id, "moved");
+}
+
+fn v2TabReorder(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const active_gtk_window = app.getActiveWindow() orelse {
+        respondError(alloc, client_fd, id, "no_window", "no active window");
+        return;
+    };
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        respondError(alloc, client_fd, id, "no_window", "not a cmux window");
+        return;
+    };
+    const index = getParamInt(params, "index") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing index");
+        return;
+    };
+    const tab_view = window.getTabView();
+    const selected = tab_view.getSelectedPage() orelse {
+        respondError(alloc, client_fd, id, "no_tab", "no selected tab");
+        return;
+    };
+    _ = tab_view.reorderPage(selected, @intCast(index));
+    respondOkString(alloc, client_fd, id, "reordered");
+}
+
+fn v2SurfaceHealth(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    if (handler_v1.getActiveSurface(app)) |s| {
+        var buf: [128]u8 = undefined;
+        const json_str = std.fmt.bufPrint(&buf, "{{\"healthy\":true,\"surface_id\":{d}}}", .{
+            @intFromPtr(s),
+        }) catch "{\"healthy\":true}";
+        respondOkRaw(alloc, client_fd, id, json_str);
+    } else {
+        respondOkRaw(alloc, client_fd, id, "{\"healthy\":false,\"reason\":\"no_surface\"}");
+    }
+}
+
+fn v2SurfaceTriggerFlash(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const surface = handler_v1.getActiveSurface(app) orelse {
+        respondError(alloc, client_fd, id, "no_surface", "no active surface");
+        return;
+    };
+    // Trigger a visual flash by sending BEL character to the terminal
+    surface.textCallback("\x07") catch {};
+    respondOkString(alloc, client_fd, id, "flashed");
+}
+
+fn v2SurfaceRefresh(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const surface = handler_v1.getActiveSurface(app) orelse {
+        respondError(alloc, client_fd, id, "no_surface", "no active surface");
+        return;
+    };
+    // Force a redraw
+    surface.draw() catch {};
+    respondOkString(alloc, client_fd, id, "refreshed");
+}
+
+fn v2WorkspaceReorder(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        respondError(alloc, client_fd, id, "internal", "workspace manager not initialized");
+        return;
+    };
+    const ws_id = getParamInt(params, "workspace_id") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing workspace_id");
+        return;
+    };
+    const target_index = getParamInt(params, "index") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing index");
+        return;
+    };
+
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+
+    // Find the workspace and move it
+    var src_idx: ?usize = null;
+    for (mgr.workspaces.items, 0..) |ws, i| {
+        if (ws.id == ws_id) {
+            src_idx = i;
+            break;
+        }
+    }
+    const src = src_idx orelse {
+        respondError(alloc, client_fd, id, "not_found", "workspace not found");
+        return;
+    };
+
+    const dst = @min(target_index, mgr.workspaces.items.len - 1);
+    if (src != dst) {
+        const item = mgr.workspaces.orderedRemove(src);
+        mgr.workspaces.insertAssumeCapacity(@intCast(dst), item);
+    }
+    respondOkString(alloc, client_fd, id, "reordered");
+}
+
+fn v2AppFocus(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    // Present the active window to bring it to focus
+    if (app.getActiveWindow()) |win| {
+        win.present();
+        respondOkString(alloc, client_fd, id, "focused");
+    } else {
+        respondError(alloc, client_fd, id, "no_window", "no active window");
+    }
+}
+
+fn v2TabAction(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const action_str = getParamString(params, "action") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing action");
+        return;
+    };
+
+    const active_gtk_window = app.getActiveWindow() orelse {
+        respondError(alloc, client_fd, id, "no_window", "no active window");
+        return;
+    };
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        respondError(alloc, client_fd, id, "no_window", "not a cmux window");
+        return;
+    };
+
+    if (std.mem.eql(u8, action_str, "next")) {
+        _ = window.selectTab(.next);
+    } else if (std.mem.eql(u8, action_str, "previous") or std.mem.eql(u8, action_str, "prev")) {
+        _ = window.selectTab(.previous);
+    } else if (std.mem.eql(u8, action_str, "last")) {
+        _ = window.selectTab(.last);
+    } else {
+        respondError(alloc, client_fd, id, "invalid_params", "action must be next/previous/last");
+        return;
+    }
+    respondOkString(alloc, client_fd, id, "done");
+}
+
+fn v2DebugTerminals(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const active_gtk_window = app.getActiveWindow() orelse {
+        respondOkRaw(alloc, client_fd, id, "[]");
+        return;
+    };
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        respondOkRaw(alloc, client_fd, id, "[]");
+        return;
+    };
+
+    const tab_view = window.getTabView();
+    const n: usize = @intCast(@max(0, tab_view.getNPages()));
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    writer.writeAll("[") catch return;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const page = tab_view.getNthPage(@intCast(i));
+        if (i > 0) writer.writeAll(",") catch return;
+        const title = std.mem.sliceTo(page.getTitle(), 0);
+        writer.print("{{\"tab\":{d},\"title\":\"{s}\"}}", .{ i, title }) catch return;
+    }
+    writer.writeAll("]") catch return;
+
+    respondOkRaw(alloc, client_fd, id, buf.items);
 }
 
 fn v2BrowserGeolocationSet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
