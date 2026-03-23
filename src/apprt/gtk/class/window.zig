@@ -550,7 +550,7 @@ pub const Window = extern struct {
         header_box.as(gtk.Widget).setMarginBottom(4);
 
         // Notification bell button (toggles notifications panel)
-        const bell_btn = gtk.Button.newFromIconName("bell-symbolic");
+        const bell_btn = gtk.Button.newFromIconName("preferences-system-notifications-symbolic");
         bell_btn.as(gtk.Widget).addCssClass("cmux-header-btn");
         bell_btn.as(gtk.Widget).setTooltipText("Notifications");
 
