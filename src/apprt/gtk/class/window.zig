@@ -697,7 +697,7 @@ pub const Window = extern struct {
         mgr.mutex.lock();
         defer mgr.mutex.unlock();
 
-        for (mgr.workspaces.items) |ws| {
+        for (mgr.workspaces.items, 0..) |ws, ws_idx| {
             const row_box = gtk.Box.new(.vertical, 1);
             row_box.as(gtk.Widget).addCssClass("cmux-ws-row");
 
@@ -720,6 +720,18 @@ pub const Window = extern struct {
                 badge_label.as(gtk.Widget).addCssClass("cmux-ws-badge");
                 badge_label.as(gtk.Widget).setHalign(.end);
                 top_hbox.append(badge_label.as(gtk.Widget));
+            }
+
+            // Keyboard shortcut hint (Ctrl+1 through Ctrl+9)
+            if (ws_idx < 9) {
+                var hint_buf: [8]u8 = undefined;
+                const hint_text = std.fmt.bufPrintZ(&hint_buf, "^{d}", .{ws_idx + 1}) catch "";
+                if (hint_text.len > 0) {
+                    const hint_label = gtk.Label.new(hint_text);
+                    hint_label.as(gtk.Widget).addCssClass("cmux-ws-shortcut");
+                    hint_label.as(gtk.Widget).setHalign(.end);
+                    top_hbox.append(hint_label.as(gtk.Widget));
+                }
             }
 
             row_box.append(top_hbox.as(gtk.Widget));

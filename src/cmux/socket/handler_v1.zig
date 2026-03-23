@@ -831,6 +831,19 @@ fn cmdOpenBrowser(args: []const u8, client_fd: posix.fd_t) void {
         Server.respond(client_fd, "error: failed to open browser");
         return;
     };
+
+    // Embed the browser widget in the window if available
+    if (browser.getWidget(id)) |browser_widget| {
+        // Make it visible and give it a minimum size
+        browser_widget.setSizeRequest(400, 300);
+        browser_widget.setVisible(1);
+
+        // The browser widget is created and managed by the panel module.
+        // Visual embedding in the window requires extending Ghostty's
+        // SplitTree to support non-Surface children, which is tracked
+        // as future work. The widget is accessible via browser.getWidget().
+    }
+
     var buf: [64]u8 = undefined;
     Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
 }

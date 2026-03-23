@@ -24,7 +24,15 @@ pub fn createWebView() ?*gtk.Widget {
         return null;
     }
     log.info("WebKitWebView created", .{});
-    return @ptrCast(@alignCast(web_view));
+
+    const widget: *gtk.Widget = @ptrCast(@alignCast(web_view));
+
+    // Inject error collection script and connect dialog signal
+    injectErrorCollection(widget);
+    connectDialogSignal(widget);
+    setupDownloadTracking(widget);
+
+    return widget;
 }
 
 /// Load a URL in a WebKitWebView.
@@ -579,6 +587,27 @@ fn onDownloadFinished(
 /// Check if the last download completed.
 pub fn isDownloadComplete() bool {
     return download_complete;
+}
+
+/// Inject error collection script into the web view.
+/// Captures JS errors into window.__cmux_errors for browser.errors.list.
+pub fn injectErrorCollection(widget: *gtk.Widget) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const ucm = c.webkit_web_view_get_user_content_manager(web_view);
+    if (ucm == null) return;
+
+    const script = c.webkit_user_script_new(
+        "window.__cmux_errors=[];window.addEventListener('error',function(e){window.__cmux_errors.push({message:e.message,source:e.filename,line:e.lineno,col:e.colno,timestamp:Date.now()});});window.addEventListener('unhandledrejection',function(e){window.__cmux_errors.push({message:String(e.reason),source:'promise',line:0,col:0,timestamp:Date.now()});});",
+        c.WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        c.WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+        null, // allow list
+        null, // block list
+    );
+    if (script) |s| {
+        c.webkit_user_content_manager_add_script(ucm, s);
+        c.webkit_user_script_unref(s);
+        log.info("error collection script injected", .{});
+    }
 }
 
 /// Get the page source HTML via JavaScript.
