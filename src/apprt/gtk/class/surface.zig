@@ -1696,8 +1696,9 @@ pub const Surface = extern struct {
             }
         }
 
+        const default_name = if (comptime build_config.cmux) "cmux" else "Ghostty";
         const t = switch (title.len) {
-            0 => "Ghostty",
+            0 => default_name,
             else => title,
         };
 

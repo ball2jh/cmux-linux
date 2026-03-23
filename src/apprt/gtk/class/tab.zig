@@ -5,6 +5,7 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
+const build_config = @import("../../../build_config.zig");
 const apprt = @import("../../../apprt.zig");
 const CoreSurface = @import("../../../Surface.zig");
 const ext = @import("../ext.zig");
@@ -472,7 +473,7 @@ pub const Tab = extern struct {
         // otherwise the overridden title if it exists, otherwise
         // the terminal title if it exists, otherwise a default string.
         const plain = plain: {
-            const default = "Ghostty";
+            const default = if (comptime build_config.cmux) "cmux" else "Ghostty";
             const config_title: ?[*:0]const u8 = title: {
                 const config = config_ orelse break :title null;
                 break :title config.get().title orelse null;
