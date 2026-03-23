@@ -43,6 +43,10 @@ var cmux_sidebar_last_hash: u64 = 0;
 var cmux_window_ref: ?*gtk.Window = null;
 // Workspace content Stack: each workspace gets its own page
 var cmux_workspace_stack: ?*gtk.Stack = null;
+// Per-workspace TabView storage (index = workspace array index)
+const max_workspaces = 64;
+var cmux_ws_tab_views: [max_workspaces]?*adw.TabView = .{null} ** max_workspaces;
+var cmux_ws_tab_bars: [max_workspaces]?*adw.TabBar = .{null} ** max_workspaces;
 
 pub const Window = extern struct {
     const Self = @This();
@@ -552,6 +556,13 @@ pub const Window = extern struct {
         header_box.as(gtk.Widget).setMarginTop(6);
         header_box.as(gtk.Widget).setMarginBottom(4);
 
+        // Toggle sidebar button
+        const toggle_btn = gtk.Button.newFromIconName("sidebar-show-symbolic");
+        toggle_btn.as(gtk.Widget).addCssClass("cmux-header-btn");
+        toggle_btn.as(gtk.Widget).addCssClass("cmux-sidebar-toggle");
+        toggle_btn.as(gtk.Widget).setTooltipText("Toggle Sidebar");
+        _ = gtk.Button.signals.clicked.connect(toggle_btn, *gtk.Button, &cmuxToggleSidebarClicked, toggle_btn, .{});
+
         // Notification bell button (toggles notifications panel)
         const bell_btn = gtk.Button.newFromIconName("preferences-system-notifications-symbolic");
         bell_btn.as(gtk.Widget).addCssClass("cmux-header-btn");
@@ -567,6 +578,7 @@ pub const Window = extern struct {
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
 
+        header_box.append(toggle_btn.as(gtk.Widget));
         header_box.append(spacer.as(gtk.Widget));
         header_box.append(bell_btn.as(gtk.Widget));
         header_box.append(add_btn.as(gtk.Widget));
@@ -595,6 +607,10 @@ pub const Window = extern struct {
         // the Blueprint template) becomes workspace 1's ("default") page.
         toast_widget.unparent();
         _ = ws_stack.addNamed(toast_widget, "ws-1");
+
+        // Store workspace 1's TabView and TabBar for swapping
+        cmux_ws_tab_views[0] = priv.tab_view;
+        cmux_ws_tab_bars[0] = priv.tab_bar;
 
         // Create a paned: sidebar | workspace stack
         const paned = gtk.Paned.new(.horizontal);
@@ -807,16 +823,45 @@ pub const Window = extern struct {
         ws_box.append(new_tab_bar.as(gtk.Widget));
         ws_box.append(new_tab_view.as(gtk.Widget));
 
+        // Store this workspace's TabView for later swapping
+        mgr.mutex.lock();
+        const ws_array_idx = mgr.workspaces.items.len - 1;
+        mgr.mutex.unlock();
+        if (ws_array_idx < max_workspaces) {
+            cmux_ws_tab_views[ws_array_idx] = new_tab_view;
+            cmux_ws_tab_bars[ws_array_idx] = new_tab_bar;
+        }
+
         // Add to the workspace Stack
         var page_name_buf: [32]u8 = undefined;
         const page_name = std.fmt.bufPrintZ(&page_name_buf, "ws-{d}", .{ws_id}) catch "ws-new";
         _ = ws_stack.addNamed(ws_box.as(gtk.Widget), page_name);
 
-        // Switch to show the new workspace
+        // Switch to show the new workspace AND swap the window's active TabView
         ws_stack.setVisibleChildName(page_name);
+        cmuxSwapActiveTabView(ws_array_idx);
 
         // Force sidebar refresh
         cmux_sidebar_last_hash = 0;
+    }
+
+    /// Swap the window's priv.tab_view to the workspace's TabView.
+    /// This makes keyboard shortcuts, new-tab, etc. target the right workspace.
+    fn cmuxSwapActiveTabView(ws_idx: usize) void {
+        if (ws_idx >= max_workspaces) return;
+        const new_tv = cmux_ws_tab_views[ws_idx] orelse return;
+        const new_tb = cmux_ws_tab_bars[ws_idx];
+
+        const gtk_win = cmux_window_ref orelse return;
+        const window = gobject.ext.cast(Window, gtk_win) orelse return;
+        const priv = window.private();
+
+        // Swap the tab_view pointer — all window operations now target
+        // this workspace's TabView
+        priv.tab_view = new_tv;
+        if (new_tb) |tb| {
+            priv.tab_bar = tb;
+        }
     }
 
     /// Periodic callback to refresh git branch info for active workspace.
@@ -886,6 +931,9 @@ pub const Window = extern struct {
         var page_name_buf: [32]u8 = undefined;
         const page_name = std.fmt.bufPrintZ(&page_name_buf, "ws-{d}", .{ws_id}) catch return;
         ws_stack.setVisibleChildName(page_name);
+
+        // Swap the window's active TabView to this workspace's TabView
+        cmuxSwapActiveTabView(idx);
     }
 
     /// DragSource prepare: returns a ContentProvider with the workspace index.
