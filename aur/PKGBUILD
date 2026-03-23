@@ -1,6 +1,6 @@
 # Maintainer: ball2jh <https://github.com/ball2jh>
 pkgname=cmux-git
-pkgver=r14566.b5667c1
+pkgver=r14569.fcf908e
 pkgrel=1
 pkgdesc='Terminal for AI coding agents with socket control API, built on Ghostty'
 arch=('x86_64')
@@ -72,12 +72,7 @@ package() {
         [ -f "$f" ] && install -Dm644 "$f" "$pkgdir/usr/share/applications/$(basename "$f")"
     done
 
-    # Icons — Ghostty icons from build
-    if [ -d zig-out/share/icons ]; then
-        cp -r zig-out/share/icons "$pkgdir/usr/share/"
-    fi
-
-    # cmux-specific icons (from macOS cmux assets)
+    # Icons — only install cmux-specific icons (Ghostty icons come from ghostty package)
     if [ -d dist/linux/cmux-icons/hicolor ]; then
         for size in 16x16 32x32 128x128 256x256 512x512; do
             install -Dm644 "dist/linux/cmux-icons/hicolor/$size/apps/ai.manaflow.cmux.png" \
