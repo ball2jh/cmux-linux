@@ -1988,9 +1988,20 @@ pub const Window = extern struct {
         _: ?*glib.Variant,
         self: *Self,
     ) callconv(.c) void {
-        const name = "Ghostty";
-        const icon = "com.mitchellh.ghostty";
-        const website = "https://ghostty.org";
+        const name = if (comptime build_config.cmux) "cmux" else "Ghostty";
+        const icon = build_config.bundle_id;
+        const website = if (comptime build_config.cmux)
+            "https://github.com/ball2jh/cmux-linux"
+        else
+            "https://ghostty.org";
+        const dev_name = if (comptime build_config.cmux)
+            "cmux-linux contributors"
+        else
+            i18n._("Ghostty Developers");
+        const issue_url = if (comptime build_config.cmux)
+            "https://github.com/ball2jh/cmux-linux/issues"
+        else
+            "https://github.com/ghostty-org/ghostty/issues";
 
         if (adw_version.supportsDialogs()) {
             adw.showAboutDialog(
@@ -1998,18 +2009,22 @@ pub const Window = extern struct {
                 "application-name",
                 name,
                 "developer-name",
-                i18n._("Ghostty Developers"),
+                dev_name,
                 "application-icon",
                 icon,
                 "version",
                 build_config.version_string.ptr,
                 "issue-url",
-                "https://github.com/ghostty-org/ghostty/issues",
+                issue_url,
                 "website",
                 website,
                 @as(?*anyopaque, null),
             );
         } else {
+            const about_title = if (comptime build_config.cmux)
+                "About cmux"
+            else
+                i18n._("About Ghostty");
             gtk.showAboutDialog(
                 self.as(gtk.Window),
                 "program-name",
@@ -2017,7 +2032,7 @@ pub const Window = extern struct {
                 "logo-icon-name",
                 icon,
                 "title",
-                i18n._("About Ghostty"),
+                about_title,
                 "version",
                 build_config.version_string.ptr,
                 "website",
