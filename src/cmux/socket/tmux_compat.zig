@@ -60,8 +60,7 @@ pub fn handleTmuxCommand(
     } else if (std.mem.eql(u8, tmux_cmd, "list-panes")) {
         handler_v1.handleCommand(ctx, alloc, "list-panes", args, client_fd);
     } else if (std.mem.eql(u8, tmux_cmd, "resize-pane")) {
-        // Resize not directly supported — acknowledge
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: resize-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "display-message")) {
         // Display as notification
         handler_v1.handleCommand(ctx, alloc, "notify", args, client_fd);
@@ -70,29 +69,33 @@ pub fn handleTmuxCommand(
     } else if (std.mem.eql(u8, tmux_cmd, "rename-window")) {
         handler_v1.handleCommand(ctx, alloc, "rename-tab", args, client_fd);
     } else if (std.mem.eql(u8, tmux_cmd, "swap-pane")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: swap-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "break-pane")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: break-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "join-pane")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: join-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "pipe-pane")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: pipe-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "wait-for")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "ok"); // wait-for is benign, keep as ok
     } else if (std.mem.eql(u8, tmux_cmd, "find-window")) {
         handler_v1.handleCommand(ctx, alloc, "list-windows", args, client_fd);
     } else if (std.mem.eql(u8, tmux_cmd, "respawn-pane")) {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "error: respawn-pane not supported");
     } else if (std.mem.eql(u8, tmux_cmd, "set-hook") or
         std.mem.eql(u8, tmux_cmd, "bind-key") or
-        std.mem.eql(u8, tmux_cmd, "unbind-key") or
-        std.mem.eql(u8, tmux_cmd, "copy-mode") or
-        std.mem.eql(u8, tmux_cmd, "set-buffer") or
-        std.mem.eql(u8, tmux_cmd, "paste-buffer") or
-        std.mem.eql(u8, tmux_cmd, "list-buffers") or
-        std.mem.eql(u8, tmux_cmd, "popup"))
+        std.mem.eql(u8, tmux_cmd, "unbind-key"))
     {
-        Server.respond(client_fd, "ok");
+        Server.respond(client_fd, "ok"); // harmless config commands, acknowledge
+    } else if (std.mem.eql(u8, tmux_cmd, "copy-mode")) {
+        Server.respond(client_fd, "error: copy-mode not supported");
+    } else if (std.mem.eql(u8, tmux_cmd, "set-buffer") or
+        std.mem.eql(u8, tmux_cmd, "paste-buffer") or
+        std.mem.eql(u8, tmux_cmd, "list-buffers"))
+    {
+        Server.respond(client_fd, "error: buffer operations not supported");
+    } else if (std.mem.eql(u8, tmux_cmd, "popup")) {
+        Server.respond(client_fd, "error: popup not supported");
     } else {
         Server.respond(client_fd, "error: unknown tmux command");
     }

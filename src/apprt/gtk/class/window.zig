@@ -615,6 +615,9 @@ pub const Window = extern struct {
         // Start periodic sidebar refresh (2 seconds)
         cmux_sidebar_timer = glib.timeoutAdd(2000, &cmuxSidebarRefreshCallback, null);
 
+        // Start periodic git branch refresh (10 seconds)
+        _ = glib.timeoutAdd(10000, &cmuxGitRefreshCallback, null);
+
         log.info("cmux workspace sidebar initialized with notification panel", .{});
     }
 
@@ -640,6 +643,9 @@ pub const Window = extern struct {
             hasher.update(std.mem.asBytes(&ws.status.statuses.items.len));
             hasher.update(std.mem.asBytes(&ws.status.progress.items.len));
             hasher.update(std.mem.asBytes(&ws.status.logs.items.len));
+            if (ws.git_branch) |b| hasher.update(b);
+            hasher.update(std.mem.asBytes(&ws.is_pinned));
+            if (ws.custom_color) |c| hasher.update(c);
         }
         const hash_unread = if (notification_store.getGlobal()) |s| s.unreadCount() else 0;
         hasher.update(std.mem.asBytes(&hash_unread));
@@ -687,6 +693,22 @@ pub const Window = extern struct {
             }
 
             row_box.append(top_hbox.as(gtk.Widget));
+
+            // Git branch indicator
+            if (ws.git_branch) |branch| {
+                var branch_buf: [80]u8 = undefined;
+                const branch_text = if (ws.is_dirty)
+                    std.fmt.bufPrintZ(&branch_buf, "\xee\x9c\xa5 {s} *", .{branch}) catch ""
+                else
+                    std.fmt.bufPrintZ(&branch_buf, "\xee\x9c\xa5 {s}", .{branch}) catch "";
+                if (branch_text.len > 0) {
+                    const branch_label = gtk.Label.new(branch_text);
+                    branch_label.as(gtk.Widget).addCssClass("cmux-ws-branch");
+                    branch_label.as(gtk.Widget).setHalign(.start);
+                    branch_label.setEllipsize(.end);
+                    row_box.append(branch_label.as(gtk.Widget));
+                }
+            }
 
             // Only show status/progress/log if they have data (clean by default)
             if (ws.status.statuses.items.len > 0) {
@@ -739,31 +761,53 @@ pub const Window = extern struct {
     fn cmuxNewWorkspaceClicked(_: *gtk.Button, _: *gtk.Button) callconv(.c) void {
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
         const mgr = cmux_ws.getGlobal() orelse return;
-        const ws_id = mgr.create("workspace", null) catch return;
+
+        // Auto-increment workspace name
+        mgr.mutex.lock();
+        const count = mgr.workspaces.items.len + 1;
+        mgr.mutex.unlock();
+
+        var name_buf: [32]u8 = undefined;
+        const ws_name = std.fmt.bufPrint(&name_buf, "workspace {d}", .{count}) catch "workspace";
+        const ws_id = mgr.create(ws_name, null) catch return;
 
         mgr.mutex.lock();
         mgr.active_id = ws_id;
         mgr.mutex.unlock();
 
         const ws_stack = cmux_workspace_stack orelse return;
-        const gtk_win = cmux_window_ref orelse return;
-        const window = gobject.ext.cast(Window, gtk_win) orelse return;
-        _ = window;
 
-        // Create a GhosttyTab with its own terminal surface.
-        // The Tab creates its own SplitTree with a terminal in init().
+        // Build a complete workspace content area:
+        // Box (vertical) → TabBar (top) → TabView → Tab (with terminal)
+        // This replicates Ghostty's window structure per-workspace.
         const app = Application.default();
+
+        // Create a new TabView for this workspace
+        const new_tab_view = adw.TabView.new();
+        new_tab_view.as(gtk.Widget).setHexpand(1);
+        new_tab_view.as(gtk.Widget).setVexpand(1);
+
+        // Create a TabBar pointing at this workspace's TabView
+        const new_tab_bar = adw.TabBar.new();
+        new_tab_bar.setView(new_tab_view);
+
+        // Create the Tab (which creates its own SplitTree + terminal surface)
         const tab = gobject.ext.newInstance(Tab, .{
             .config = app.getConfig(),
         });
 
-        // Wrap in a box for the Stack page
+        // Add the Tab to the new TabView — this is what makes the
+        // terminal actually initialize and render properly.
+        _ = new_tab_view.append(tab.as(gtk.Widget));
+
+        // Assemble: vertical box with tab bar on top, tab view below
         const ws_box = gtk.Box.new(.vertical, 0);
         ws_box.as(gtk.Widget).setHexpand(1);
         ws_box.as(gtk.Widget).setVexpand(1);
-        ws_box.append(tab.as(gtk.Widget));
+        ws_box.append(new_tab_bar.as(gtk.Widget));
+        ws_box.append(new_tab_view.as(gtk.Widget));
 
-        // Add to the workspace Stack with a unique page name
+        // Add to the workspace Stack
         var page_name_buf: [32]u8 = undefined;
         const page_name = std.fmt.bufPrintZ(&page_name_buf, "ws-{d}", .{ws_id}) catch "ws-new";
         _ = ws_stack.addNamed(ws_box.as(gtk.Widget), page_name);
@@ -773,6 +817,42 @@ pub const Window = extern struct {
 
         // Force sidebar refresh
         cmux_sidebar_last_hash = 0;
+    }
+
+    /// Periodic callback to refresh git branch info for active workspace.
+    fn cmuxGitRefreshCallback(_: ?*anyopaque) callconv(.c) c_int {
+        if (comptime !build_config.cmux) return 0;
+
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const git_info = @import("../../../cmux/workspace/git_info.zig");
+        const mgr = cmux_ws.getGlobal() orelse return 1;
+
+        // Get the active workspace's cwd
+        mgr.mutex.lock();
+        const ws_cwd: ?[]const u8 = blk: {
+            for (mgr.workspaces.items) |ws| {
+                if (ws.id == mgr.active_id) {
+                    break :blk ws.cwd;
+                }
+            }
+            break :blk null;
+        };
+        const active_id = mgr.active_id;
+        mgr.mutex.unlock();
+
+        if (ws_cwd) |cwd| {
+            // Refresh git branch cache (runs `git rev-parse`, typically < 50ms)
+            git_info.refreshBranch(cwd);
+
+            // Update workspace with new branch info
+            if (git_info.getCachedBranch(cwd)) |branch| {
+                mgr.setGitBranch(active_id, branch, false) catch {};
+                // Invalidate sidebar hash to trigger visual update
+                cmux_sidebar_last_hash = 0;
+            }
+        }
+
+        return 1; // Keep timer
     }
 
     /// Workspace row selected — switch active workspace AND switch to its tab.

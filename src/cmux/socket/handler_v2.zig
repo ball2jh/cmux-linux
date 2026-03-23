@@ -499,15 +499,19 @@ fn v2WorkspaceCreate(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Va
     };
 
     var name: []const u8 = "workspace";
+    var cwd: ?[]const u8 = null;
     if (params) |p| {
         if (p == .object) {
             if (p.object.get("name")) |n| {
                 if (n == .string) name = n.string;
             }
+            if (p.object.get("cwd")) |c| {
+                if (c == .string) cwd = c.string;
+            }
         }
     }
 
-    const ws_id = mgr.create(name, null) catch {
+    const ws_id = mgr.create(name, cwd) catch {
         respondError(alloc, client_fd, id, "internal", "failed to create workspace");
         return;
     };

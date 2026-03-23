@@ -437,13 +437,22 @@ fn cmdListWorkspaces(alloc: Allocator, client_fd: posix.fd_t) void {
     }
 }
 
-fn cmdNewWorkspace(_: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+fn cmdNewWorkspace(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
     const mgr = workspace_mgr.getGlobal() orelse {
         Server.respond(client_fd, "error: workspace manager not initialized");
         return;
     };
-    const name = if (args.len > 0) args else "workspace";
-    const id = mgr.create(name, null) catch {
+
+    // Parse --cwd=PATH and --command=CMD flags
+    const cwd = extractFlag(args, "--cwd=");
+    _ = extractFlag(args, "--command="); // acknowledged, not yet wired to tab creation
+
+    // Strip flags to get workspace name
+    const name = stripFlags(alloc, args) orelse "workspace";
+    defer if (name.ptr != "workspace".ptr) alloc.free(@constCast(name));
+
+    const ws_name = if (name.len > 0) name else "workspace";
+    const id = mgr.create(ws_name, cwd) catch {
         Server.respond(client_fd, "error: failed to create workspace");
         return;
     };
@@ -963,8 +972,10 @@ fn cmdListLog(alloc: Allocator, client_fd: posix.fd_t) void {
 
 fn cmdIdentify(client_fd: posix.fd_t) void {
     const build_config = @import("../../build_config.zig");
-    var buf: [256]u8 = undefined;
-    const resp = std.fmt.bufPrint(&buf, "cmux-linux {s} gtk", .{build_config.version_string}) catch "cmux-linux";
+    var buf: [512]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf,
+        \\{{"app":"cmux","version":"{s}","platform":"linux","runtime":"gtk","features":["v1","v2","agent","browser","notifications","workspaces","status","progress","log","ports","splits"]}}
+    , .{build_config.version_string}) catch "cmux-linux";
     Server.respond(client_fd, resp);
 }
 
@@ -995,10 +1006,24 @@ fn cmdSidebarState(alloc: Allocator, client_fd: posix.fd_t) void {
 
     writer.writeAll("{\"workspaces\":") catch return;
     writer.writeAll(ws_json) catch return;
-    // Add notification unread count
+
+    // Active workspace ID
+    writer.print(",\"active_workspace_id\":{d}", .{mgr.activeId()}) catch return;
+
+    // Notification counts
     const notif_store = notification_store.getGlobal();
     const unread = if (notif_store) |s| s.unreadCount() else 0;
+    const total_notif: usize = if (notif_store) |s| blk: {
+        s.mutex.lock();
+        defer s.mutex.unlock();
+        break :blk s.entries.items.len;
+    } else 0;
     writer.print(",\"unread_notifications\":{d}", .{unread}) catch return;
+    writer.print(",\"notification_count\":{d}", .{total_notif}) catch return;
+
+    // Sidebar visibility (always visible for now — no toggle implemented)
+    writer.writeAll(",\"sidebar_visible\":true") catch return;
+    writer.writeAll(",\"sidebar_width\":200") catch return;
 
     writer.writeAll(",\"ports\":") catch return;
     writer.writeAll(ports_json) catch return;
@@ -1299,39 +1324,118 @@ fn cmdWorkspaceAction(args: []const u8, client_fd: posix.fd_t) void {
         Server.respond(client_fd, "error: no workspace manager");
         return;
     };
-    mgr.mutex.lock();
-    defer mgr.mutex.unlock();
 
-    if (mgr.workspaces.items.len == 0) {
-        Server.respond(client_fd, "error: no workspaces");
-        return;
+    // Split action from extra args (e.g. "set-color --color=#FF0000")
+    var action: []const u8 = args;
+    var action_args: []const u8 = "";
+    if (std.mem.indexOf(u8, args, " ")) |sp| {
+        action = args[0..sp];
+        action_args = std.mem.trim(u8, args[sp + 1 ..], &[_]u8{ ' ', '\t' });
     }
 
-    // Find current workspace index
-    var current_idx: usize = 0;
-    for (mgr.workspaces.items, 0..) |ws, i| {
-        if (ws.id == mgr.active_id) {
-            current_idx = i;
-            break;
+    // Navigation actions (need mutex)
+    if (std.mem.eql(u8, action, "next") or std.mem.eql(u8, action, "previous") or
+        std.mem.eql(u8, action, "prev") or std.mem.eql(u8, action, "last"))
+    {
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+
+        if (mgr.workspaces.items.len == 0) {
+            Server.respond(client_fd, "error: no workspaces");
+            return;
         }
-    }
 
-    const total = mgr.workspaces.items.len;
-    var target_idx: usize = current_idx;
+        var current_idx: usize = 0;
+        for (mgr.workspaces.items, 0..) |ws, i| {
+            if (ws.id == mgr.active_id) {
+                current_idx = i;
+                break;
+            }
+        }
 
-    if (std.mem.eql(u8, args, "next")) {
-        target_idx = (current_idx + 1) % total;
-    } else if (std.mem.eql(u8, args, "previous") or std.mem.eql(u8, args, "prev")) {
-        target_idx = if (current_idx == 0) total - 1 else current_idx - 1;
-    } else if (std.mem.eql(u8, args, "last")) {
-        target_idx = total - 1;
-    } else {
-        Server.respond(client_fd, "error: usage: workspace-action next|previous|last");
+        const total = mgr.workspaces.items.len;
+        var target_idx: usize = current_idx;
+
+        if (std.mem.eql(u8, action, "next")) {
+            target_idx = (current_idx + 1) % total;
+        } else if (std.mem.eql(u8, action, "previous") or std.mem.eql(u8, action, "prev")) {
+            target_idx = if (current_idx == 0) total - 1 else current_idx - 1;
+        } else {
+            target_idx = total - 1;
+        }
+
+        mgr.active_id = mgr.workspaces.items[target_idx].id;
+        Server.respond(client_fd, "ok");
         return;
     }
 
-    mgr.active_id = mgr.workspaces.items[target_idx].id;
-    Server.respond(client_fd, "ok");
+    // Workspace metadata actions
+    const ws_id = mgr.activeId();
+
+    if (std.mem.eql(u8, action, "pin")) {
+        mgr.setPinned(ws_id, true);
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "unpin")) {
+        mgr.setPinned(ws_id, false);
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "set-color")) {
+        const color = extractFlag(action_args, "--color=") orelse action_args;
+        mgr.setColor(ws_id, if (color.len > 0) color else null) catch {};
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "clear-color")) {
+        mgr.setColor(ws_id, null) catch {};
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "rename")) {
+        if (action_args.len > 0) {
+            _ = mgr.rename(ws_id, action_args) catch {};
+        }
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "clear-name")) {
+        _ = mgr.rename(ws_id, "workspace") catch {};
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "move-up")) {
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+        for (mgr.workspaces.items, 0..) |ws, i| {
+            if (ws.id == ws_id and i > 0) {
+                mgr.mutex.unlock();
+                _ = mgr.reorder(ws_id, i - 1);
+                mgr.mutex.lock();
+                break;
+            }
+        }
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "move-down")) {
+        mgr.mutex.lock();
+        defer mgr.mutex.unlock();
+        for (mgr.workspaces.items, 0..) |ws, i| {
+            if (ws.id == ws_id) {
+                mgr.mutex.unlock();
+                _ = mgr.reorder(ws_id, i + 1);
+                mgr.mutex.lock();
+                break;
+            }
+        }
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "move-top")) {
+        _ = mgr.reorder(ws_id, 0);
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, action, "close-others")) {
+        // Close all workspaces except active
+        mgr.mutex.lock();
+        var to_close: std.ArrayListUnmanaged(u64) = .empty;
+        for (mgr.workspaces.items) |ws| {
+            if (ws.id != ws_id) {
+                to_close.append(mgr.alloc, ws.id) catch continue;
+            }
+        }
+        mgr.mutex.unlock();
+        for (to_close.items) |id| _ = mgr.close(id);
+        to_close.deinit(mgr.alloc);
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: unknown workspace-action");
+    }
 }
 
 fn cmdTabAction(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
