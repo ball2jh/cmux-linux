@@ -613,7 +613,7 @@ pub const Window = extern struct {
         const sidebar_list = cmux_sidebar_listbox orelse return 1;
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
         const notification_store = @import("../../../cmux/notification/store.zig");
-        const port_scanner = @import("../../../cmux/workspace/port_scanner.zig");
+        // port_scanner removed from sidebar display (ports are global, not per-workspace)
         const mgr = cmux_ws.getGlobal() orelse return 1;
 
         // Compute content hash to skip rebuild if nothing changed
@@ -636,12 +636,18 @@ pub const Window = extern struct {
         if (current_hash == cmux_sidebar_last_hash) return 1; // No changes
         cmux_sidebar_last_hash = current_hash;
 
+        // Guard: prevent row_selected from firing during rebuild
+        cmux_rebuilding_sidebar = true;
+        defer {
+            cmux_rebuilding_sidebar = false;
+        }
+
         // Remove all existing rows
         while (sidebar_list.getRowAtIndex(0)) |row| {
             sidebar_list.remove(row.as(gtk.Widget));
         }
 
-        for (mgr.workspaces.items, 0..) |ws, ws_idx| {
+        for (mgr.workspaces.items) |ws| {
             const row_box = gtk.Box.new(.vertical, 1);
             row_box.as(gtk.Widget).addCssClass("cmux-ws-row");
 
@@ -666,114 +672,30 @@ pub const Window = extern struct {
                 top_hbox.append(badge_label.as(gtk.Widget));
             }
 
-            // Keyboard shortcut hint (Ctrl+1 through Ctrl+9)
-            if (ws_idx < 9) {
-                var hint_buf: [8]u8 = undefined;
-                const hint_text = std.fmt.bufPrintZ(&hint_buf, "^{d}", .{ws_idx + 1}) catch "";
-                if (hint_text.len > 0) {
-                    const hint_label = gtk.Label.new(hint_text);
-                    hint_label.as(gtk.Widget).addCssClass("cmux-ws-shortcut");
-                    hint_label.as(gtk.Widget).setHalign(.end);
-                    top_hbox.append(hint_label.as(gtk.Widget));
-                }
-            }
-
             row_box.append(top_hbox.as(gtk.Widget));
 
-            // Git branch info (detected from terminal PWD)
-            const git_info = @import("../../../cmux/workspace/git_info.zig");
-            // Try to get branch from home dir as fallback
-            const home = std.posix.getenv("HOME") orelse "/home";
-            if (git_info.getCachedBranch(home)) |branch| {
-                var branch_buf: [64]u8 = undefined;
-                const branch_text = std.fmt.bufPrintZ(&branch_buf, "\xE2\x8E\x87 {s}", .{branch}) catch "";
-                if (branch_text.len > 0) {
-                    const branch_label = gtk.Label.new(branch_text);
-                    branch_label.as(gtk.Widget).addCssClass("cmux-ws-branch");
-                    branch_label.as(gtk.Widget).setHalign(.start);
-                    branch_label.setEllipsize(.end);
-                    row_box.append(branch_label.as(gtk.Widget));
-                }
-            } else {
-                // Trigger async branch detection for next refresh
-                git_info.refreshBranch(home);
-            }
-
-            // Status entries
-            for (ws.status.statuses.items) |status_entry| {
+            // Only show status/progress/log if they have data (clean by default)
+            if (ws.status.statuses.items.len > 0) {
+                const first = ws.status.statuses.items[0];
                 var status_buf: [128]u8 = undefined;
                 const status_text = std.fmt.bufPrintZ(&status_buf, "{s}: {s}", .{
-                    status_entry.key, status_entry.value,
-                }) catch continue;
-                const status_label = gtk.Label.new(status_text);
-                status_label.as(gtk.Widget).addCssClass("cmux-ws-status");
-                status_label.as(gtk.Widget).setHalign(.start);
-                status_label.setEllipsize(.end);
-                row_box.append(status_label.as(gtk.Widget));
+                    first.key, first.value,
+                }) catch "";
+                if (status_text.len > 0) {
+                    const status_label = gtk.Label.new(status_text);
+                    status_label.as(gtk.Widget).addCssClass("cmux-ws-status");
+                    status_label.as(gtk.Widget).setHalign(.start);
+                    status_label.setEllipsize(.end);
+                    row_box.append(status_label.as(gtk.Widget));
+                }
             }
 
-            // Progress bars
-            for (ws.status.progress.items) |prog| {
-                const prog_hbox = gtk.Box.new(.horizontal, 4);
+            if (ws.status.progress.items.len > 0) {
+                const prog = ws.status.progress.items[0];
                 const progress_bar = gtk.ProgressBar.new();
                 progress_bar.setFraction(prog.value);
                 progress_bar.as(gtk.Widget).addCssClass("cmux-sidebar-progress");
-                progress_bar.as(gtk.Widget).setHexpand(1);
-                progress_bar.as(gtk.Widget).setValign(.center);
-                prog_hbox.append(progress_bar.as(gtk.Widget));
-
-                var pct_buf: [8]u8 = undefined;
-                const pct_text = std.fmt.bufPrintZ(&pct_buf, "{d}%", .{@as(u32, @intFromFloat(prog.value * 100))}) catch "";
-                if (pct_text.len > 0) {
-                    const pct_label = gtk.Label.new(pct_text);
-                    pct_label.as(gtk.Widget).addCssClass("cmux-ws-progress-label");
-                    prog_hbox.append(pct_label.as(gtk.Widget));
-                }
-                row_box.append(prog_hbox.as(gtk.Widget));
-            }
-
-            // Latest log
-            if (ws.status.logs.items.len > 0) {
-                const last_log = ws.status.logs.items[ws.status.logs.items.len - 1];
-                var log_buf: [96]u8 = undefined;
-                const log_text = std.fmt.bufPrintZ(&log_buf, "\xE2\x96\xB8 {s}", .{last_log.message}) catch "";
-                if (log_text.len > 0) {
-                    const log_label = gtk.Label.new(log_text);
-                    log_label.as(gtk.Widget).addCssClass("cmux-ws-log");
-                    log_label.as(gtk.Widget).setHalign(.start);
-                    log_label.setEllipsize(.end);
-                    row_box.append(log_label.as(gtk.Widget));
-                }
-            }
-
-            // Ports
-            const ports = port_scanner.getPorts();
-            if (ports.len > 0) {
-                var ports_buf: [128]u8 = undefined;
-                var ports_len: usize = 0;
-                const max_show: usize = 4;
-                for (ports[0..@min(ports.len, max_show)]) |p| {
-                    if (ports_len > 0) {
-                        if (ports_len < ports_buf.len - 1) {
-                            ports_buf[ports_len] = ' ';
-                            ports_len += 1;
-                        }
-                    }
-                    const written = std.fmt.bufPrint(ports_buf[ports_len..], ":{d}", .{p.port}) catch break;
-                    ports_len += written.len;
-                }
-                if (ports.len > max_show) {
-                    const more = std.fmt.bufPrint(ports_buf[ports_len..], " +{d}", .{ports.len - max_show}) catch "";
-                    ports_len += more.len;
-                }
-                if (ports_len > 0) {
-                    ports_buf[@min(ports_len, ports_buf.len - 1)] = 0;
-                    const ports_label = gtk.Label.new(@ptrCast(&ports_buf));
-                    ports_label.as(gtk.Widget).addCssClass("cmux-ws-ports");
-                    ports_label.as(gtk.Widget).setHalign(.start);
-                    ports_label.setEllipsize(.end);
-                    row_box.append(ports_label.as(gtk.Widget));
-                }
+                row_box.append(progress_bar.as(gtk.Widget));
             }
 
             sidebar_list.append(row_box.as(gtk.Widget));
@@ -820,7 +742,14 @@ pub const Window = extern struct {
     }
 
     /// Workspace row selected — switch active workspace AND switch to its tab.
+    /// Guard to prevent row_selected from firing during sidebar rebuild.
+    var cmux_rebuilding_sidebar: bool = false;
+
+    /// Workspace row selected — switch active workspace and select tab.
     fn cmuxWorkspaceRowSelected(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, _: *gtk.ListBox) callconv(.c) void {
+        // Don't react to selection changes during sidebar rebuild
+        if (cmux_rebuilding_sidebar) return;
+
         const selected_row = row orelse return;
         const index = selected_row.getIndex();
         if (index < 0) return;
@@ -838,19 +767,17 @@ pub const Window = extern struct {
         mgr.mutex.unlock();
 
         // Switch to the corresponding tab in the TabView
+        // Each workspace maps to a tab by index. If there aren't enough
+        // tabs, just select the last one — don't create new tabs.
         const gtk_win = cmux_window_ref orelse return;
         const window = gobject.ext.cast(Window, gtk_win) orelse return;
         const tab_view = window.getTabView();
         const n_pages = tab_view.getNPages();
+        if (n_pages <= 0) return;
 
-        // If the workspace index maps to a tab, select it
-        if (index < n_pages) {
-            const page = tab_view.getNthPage(index);
-            tab_view.setSelectedPage(page);
-        } else {
-            // Workspace has no tab yet — create one
-            window.newTab(null);
-        }
+        const target = if (index < n_pages) index else n_pages - 1;
+        const page = tab_view.getNthPage(target);
+        tab_view.setSelectedPage(page);
     }
 
     /// DragSource prepare: returns a ContentProvider with the workspace index.

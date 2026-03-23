@@ -147,6 +147,14 @@ fn dispatch(
         handler_v1.handleCommand(@ptrCast(app), alloc, "browser-forward", "0", client_fd);
     } else if (std.mem.eql(u8, method, "browser.reload")) {
         handler_v1.handleCommand(@ptrCast(app), alloc, "browser-reload", "0", client_fd);
+    } else if (std.mem.eql(u8, method, "browser.zoom.set")) {
+        v2BrowserZoomSet(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.zoom.get")) {
+        v2BrowserZoomGet(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.inspector.show")) {
+        v2BrowserInspectorShow(alloc, params, id, client_fd);
+    } else if (std.mem.eql(u8, method, "browser.inspector.hide")) {
+        v2BrowserInspectorHide(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "markdown.open")) {
         v2MarkdownOpen(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "markdown.list")) {
@@ -1431,3 +1439,53 @@ fn v2AgentNotification(alloc: Allocator, params: ?std.json.Value, id: ?std.json.
     handler_v1.setAgentStatus(resolved_ws, "Needs input", "bell.fill", "#4C8DFF");
     respondOkString(alloc, client_fd, id, "OK");
 }
+
+// --- Browser zoom and inspector ---
+
+fn v2BrowserZoomSet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const browser_id = getParamInt(params, "id") orelse 0;
+    const level = getParamFloat(params, "level") orelse 1.0;
+    const webkit = @import("../browser/webkit.zig");
+    if (browser_panel.getWidget(@intCast(browser_id))) |w| {
+        webkit.setZoomLevel(w, level);
+        respondOkString(alloc, client_fd, id, "ok");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+    }
+}
+
+fn v2BrowserZoomGet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const browser_id = getParamInt(params, "id") orelse 0;
+    const webkit = @import("../browser/webkit.zig");
+    if (browser_panel.getWidget(@intCast(browser_id))) |w| {
+        const level = webkit.getZoomLevel(w);
+        var buf: [64]u8 = undefined;
+        const level_str = std.fmt.bufPrint(&buf, "{d:.2}", .{level}) catch "1.0";
+        respondOkRaw(alloc, client_fd, id, level_str);
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+    }
+}
+
+fn v2BrowserInspectorShow(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const browser_id = getParamInt(params, "id") orelse 0;
+    const webkit = @import("../browser/webkit.zig");
+    if (browser_panel.getWidget(@intCast(browser_id))) |w| {
+        webkit.showInspector(w);
+        respondOkString(alloc, client_fd, id, "ok");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+    }
+}
+
+fn v2BrowserInspectorHide(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const browser_id = getParamInt(params, "id") orelse 0;
+    const webkit = @import("../browser/webkit.zig");
+    if (browser_panel.getWidget(@intCast(browser_id))) |w| {
+        webkit.hideInspector(w);
+        respondOkString(alloc, client_fd, id, "ok");
+    } else {
+        respondError(alloc, client_fd, id, "not_found", "browser not found");
+    }
+}
+

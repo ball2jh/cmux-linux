@@ -620,3 +620,40 @@ pub fn getPageSource(
 ) void {
     evaluateJavaScript(widget, "document.documentElement.outerHTML", alloc, client_fd);
 }
+
+/// Set the zoom level on a WebKitWebView.
+pub fn setZoomLevel(widget: *gtk.Widget, level: f64) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    c.webkit_web_view_set_zoom_level(web_view, level);
+    log.debug("zoom level set to {d:.2}", .{level});
+}
+
+/// Get the current zoom level of a WebKitWebView.
+pub fn getZoomLevel(widget: *gtk.Widget) f64 {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    return c.webkit_web_view_get_zoom_level(web_view);
+}
+
+/// Show the Web Inspector (developer tools) for a WebKitWebView.
+pub fn showInspector(widget: *gtk.Widget) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    // Enable developer extras in settings first
+    const settings = c.webkit_web_view_get_settings(web_view);
+    if (settings != null) {
+        c.webkit_settings_set_enable_developer_extras(settings, 1);
+    }
+    const inspector = c.webkit_web_view_get_inspector(web_view);
+    if (inspector != null) {
+        c.webkit_web_inspector_show(inspector);
+        log.info("web inspector shown", .{});
+    }
+}
+
+/// Hide the Web Inspector (developer tools).
+pub fn hideInspector(widget: *gtk.Widget) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const inspector = c.webkit_web_view_get_inspector(web_view);
+    if (inspector != null) {
+        c.webkit_web_inspector_close(inspector);
+    }
+}

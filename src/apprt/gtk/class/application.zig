@@ -2286,6 +2286,14 @@ const Action = struct {
             }
         }
 
+        // Restore session tabs if we have pending restore data
+        if (comptime build_config.cmux) {
+            if (cmux_session.hasPendingRestore()) {
+                const dims = cmux_session.restoreTabs(win);
+                win.as(gtk.Window).setDefaultSize(dims.width, dims.height);
+            }
+        }
+
         // Show the window
         gtk.Window.present(win.as(gtk.Window));
     }
