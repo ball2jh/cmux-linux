@@ -31,7 +31,7 @@ makepkg -si
 
 ```bash
 # Dependencies (Arch)
-sudo pacman -S zig gtk4 libadwaita gtk4-layer-shell blueprint-compiler pkgconf
+sudo pacman -S zig gtk4 libadwaita gtk4-layer-shell webkitgtk-6.0 blueprint-compiler pkgconf
 
 # Build
 git clone https://github.com/ball2jh/cmux-linux.git

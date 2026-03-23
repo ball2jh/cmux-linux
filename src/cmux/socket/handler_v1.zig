@@ -73,6 +73,8 @@ pub fn handleCommand(
         cmdNewSplit(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "list-panes")) {
         cmdListPanes(app, alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "close-surface")) {
+        cmdCloseSurface(app, client_fd);
     } else if (std.mem.eql(u8, command, "send-key")) {
         cmdSendKey(app, args, client_fd);
     } else if (std.mem.eql(u8, command, "current-window")) {
@@ -493,6 +495,18 @@ fn cmdFocusWindow(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t
     } else {
         Server.respond(client_fd, "error: no window to focus");
     }
+}
+
+fn cmdCloseSurface(app: *gtk.Application, client_fd: posix.fd_t) void {
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "error: no active surface");
+        return;
+    };
+    _ = surface.performBindingAction(.close_surface) catch {
+        Server.respond(client_fd, "error: failed to close surface");
+        return;
+    };
+    Server.respond(client_fd, "ok");
 }
 
 // --- Status/Progress/Log commands ---

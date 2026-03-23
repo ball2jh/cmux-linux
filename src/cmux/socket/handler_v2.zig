@@ -103,6 +103,8 @@ fn dispatch(
         v2SurfaceSendKey(app, alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "pane.list")) {
         v2PaneList(app, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "surface.close")) {
+        handler_v1.handleCommand(@ptrCast(app), alloc, "close-surface", "", client_fd);
     } else if (std.mem.eql(u8, method, "surface.read_text")) {
         v2ReadScreen(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.list")) {

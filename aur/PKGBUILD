@@ -1,6 +1,6 @@
 # Maintainer: ball2jh <https://github.com/ball2jh>
 pkgname=cmux-git
-pkgver=r5.ba31c99
+pkgver=r14540.148a026
 pkgrel=1
 pkgdesc='Terminal for AI coding agents with socket control API, built on Ghostty'
 arch=('x86_64')
@@ -10,6 +10,7 @@ depends=(
     'gtk4'
     'libadwaita'
     'gtk4-layer-shell'
+    'webkitgtk-6.0'
     'fontconfig'
     'freetype2'
     'harfbuzz'
