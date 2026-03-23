@@ -14,6 +14,7 @@ pub const handler_v2 = @import("socket/handler_v2.zig");
 pub const notification = @import("notification/store.zig");
 pub const workspace = @import("workspace/manager.zig");
 pub const workspace_status = @import("workspace/status.zig");
+pub const port_scanner = @import("workspace/port_scanner.zig");
 pub const session = @import("session/persistence.zig");
 pub const browser = @import("browser/panel.zig");
 

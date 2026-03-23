@@ -16,6 +16,7 @@ const gtk = @import("gtk");
 const Server = @import("server.zig").Server;
 const handler_v1 = @import("handler_v1.zig");
 const workspace_mgr = @import("../workspace/manager.zig");
+const port_scanner = @import("../workspace/port_scanner.zig");
 const browser_panel = @import("../browser/panel.zig");
 
 const log = std.log.scoped(.cmux_v2);
@@ -82,6 +83,12 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "system.version")) {
         const build_config = @import("../../build_config.zig");
         respondOkString(alloc, client_fd, id, build_config.version_string);
+    } else if (std.mem.eql(u8, method, "system.identify")) {
+        const build_config = @import("../../build_config.zig");
+        respondOkRaw(alloc, client_fd, id,
+            "{\"app\":\"cmux-linux\",\"version\":\"" ++ build_config.version_string ++ "\",\"runtime\":\"gtk\",\"platform\":\"linux\"}");
+    } else if (std.mem.eql(u8, method, "window.current")) {
+        v2WindowCurrent(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "window.list")) {
         v2ListWindows(app, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "window.create")) {
@@ -110,6 +117,8 @@ fn dispatch(
         v2WorkspaceClose(params, alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "workspace.rename")) {
         v2WorkspaceRename(params, alloc, id, client_fd);
+    } else if (std.mem.eql(u8, method, "workspace.ports")) {
+        v2WorkspacePorts(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.open")) {
         v2BrowserOpen(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.navigate")) {
@@ -202,6 +211,15 @@ fn v2ListNotifications(alloc: Allocator, id: ?std.json.Value, client_fd: posix.f
     writer.writeAll("]") catch return;
 
     respondOkRaw(alloc, client_fd, id, buf.items);
+}
+
+fn v2WindowCurrent(app: *gtk.Application, alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    if (app.getActiveWindow()) |win| {
+        var buf: [64]u8 = undefined;
+        respondOkRaw(alloc, client_fd, id, std.fmt.bufPrint(&buf, "{d}", .{@intFromPtr(win)}) catch "null");
+    } else {
+        respondOkRaw(alloc, client_fd, id, "null");
+    }
 }
 
 fn v2SurfaceSplit(app: *gtk.Application, alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
@@ -374,6 +392,15 @@ fn v2WorkspaceRename(params: ?std.json.Value, alloc: Allocator, id: ?std.json.Va
     } else {
         respondError(alloc, client_fd, id, "not_found", "workspace not found");
     }
+}
+
+fn v2WorkspacePorts(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const json_str = port_scanner.formatJson(alloc) catch {
+        respondError(alloc, client_fd, id, "internal", "failed to scan ports");
+        return;
+    };
+    defer alloc.free(json_str);
+    respondOkRaw(alloc, client_fd, id, json_str);
 }
 
 fn v2BrowserOpen(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {

@@ -22,6 +22,7 @@ const workspace_mgr = @import("../workspace/manager.zig");
 const browser = @import("../browser/panel.zig");
 const WorkspaceStatus = @import("../workspace/status.zig").WorkspaceStatus;
 const Binding = @import("../../input/Binding.zig");
+const port_scanner = @import("../workspace/port_scanner.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -94,12 +95,22 @@ pub fn handleCommand(
         cmdClearLog(client_fd);
     } else if (std.mem.eql(u8, command, "list-log")) {
         cmdListLog(alloc, client_fd);
+    } else if (std.mem.eql(u8, command, "list-ports")) {
+        cmdListPorts(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "open-browser")) {
         cmdOpenBrowser(args, client_fd);
     } else if (std.mem.eql(u8, command, "navigate")) {
         cmdNavigate(args, client_fd);
     } else if (std.mem.eql(u8, command, "get-url")) {
         cmdGetUrl(args, client_fd);
+    } else if (std.mem.eql(u8, command, "identify")) {
+        cmdIdentify(client_fd);
+    } else if (std.mem.eql(u8, command, "capabilities")) {
+        Server.respond(client_fd, "v1 v2 send read-screen notifications workspaces browser status progress log ports splits");
+    } else if (std.mem.eql(u8, command, "refresh-surfaces")) {
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, command, "sidebar-state")) {
+        cmdSidebarState(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -610,6 +621,56 @@ fn cmdListLog(alloc: Allocator, client_fd: posix.fd_t) void {
     } else {
         _ = posix.write(client_fd, text) catch {};
     }
+}
+
+fn cmdIdentify(client_fd: posix.fd_t) void {
+    const build_config = @import("../../build_config.zig");
+    var buf: [256]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "cmux-linux {s} gtk", .{build_config.version_string}) catch "cmux-linux";
+    Server.respond(client_fd, resp);
+}
+
+fn cmdSidebarState(alloc: Allocator, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "{}");
+        return;
+    };
+
+    // formatJson acquires its own lock, so don't hold mutex here
+    const ws_json = mgr.formatJson(alloc) catch {
+        Server.respond(client_fd, "{}");
+        return;
+    };
+    defer alloc.free(ws_json);
+
+    const ports_json = port_scanner.formatJson(alloc) catch blk: {
+        break :blk alloc.dupe(u8, "[]") catch {
+            Server.respond(client_fd, "{}");
+            return;
+        };
+    };
+    defer alloc.free(ports_json);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    writer.writeAll("{\"workspaces\":") catch return;
+    writer.writeAll(ws_json) catch return;
+    writer.writeAll(",\"ports\":") catch return;
+    writer.writeAll(ports_json) catch return;
+    writer.writeAll("}") catch return;
+
+    Server.respond(client_fd, buf.items);
+}
+
+fn cmdListPorts(alloc: Allocator, client_fd: posix.fd_t) void {
+    const text = port_scanner.formatText(alloc) catch {
+        Server.respond(client_fd, "error: failed to scan ports");
+        return;
+    };
+    defer alloc.free(text);
+    Server.respond(client_fd, if (text.len > 0) text else "");
 }
 
 fn cmdOpenBrowser(args: []const u8, client_fd: posix.fd_t) void {

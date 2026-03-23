@@ -77,9 +77,13 @@ pub fn run(alloc: Allocator) !u8 {
             return 1;
         };
 
-    // Determine socket path
-    const uid = std.os.linux.getuid();
-    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/cmux-{d}.sock", .{uid});
+    // Determine socket path (env override or default)
+    const socket_path = if (std.posix.getenv("CMUX_SOCKET_PATH") orelse std.posix.getenv("CMUX_SOCKET")) |env_path|
+        try alloc.dupe(u8, env_path)
+    else blk: {
+        const uid = std.os.linux.getuid();
+        break :blk try std.fmt.allocPrint(alloc, "/tmp/cmux-{d}.sock", .{uid});
+    };
     defer alloc.free(socket_path);
 
     // Connect to socket

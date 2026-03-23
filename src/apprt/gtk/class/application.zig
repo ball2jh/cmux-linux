@@ -16,6 +16,7 @@ const cmux_workspaces = if (build_config.cmux) @import("../../../cmux/workspace/
 const cmux_session = if (build_config.cmux) @import("../../../cmux/session/persistence.zig") else struct {};
 const cmux_browser = if (build_config.cmux) @import("../../../cmux/browser/panel.zig") else struct {};
 const cmux_auth = if (build_config.cmux) @import("../../../cmux/socket/auth.zig") else struct {};
+const cmux_ports = if (build_config.cmux) @import("../../../cmux/workspace/port_scanner.zig") else struct {};
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
 const apprt = @import("../../../apprt.zig");
@@ -453,6 +454,7 @@ pub const Application = extern struct {
             cmux_notifications.deinitGlobal(alloc);
             cmux_workspaces.deinitGlobal(alloc);
             cmux_browser.deinitGlobal();
+            cmux_ports.deinitGlobal();
         }
 
         priv.config.unref();
@@ -1339,6 +1341,7 @@ pub const Application = extern struct {
             // cmuxOnly requires processes to be descendants, which blocks
             // external tools like `cmux +ctl`. Use automation as default.
             cmux_auth.init(.automation);
+            cmux_ports.initGlobal(self.allocator());
             // Restore previous session (workspaces) before starting
             _ = cmux_session.restore(self.allocator());
             self.startupCmuxSocket();
