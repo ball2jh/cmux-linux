@@ -55,7 +55,7 @@ pub fn handleCommand(
     } else if (std.mem.eql(u8, command, "list-notifications")) {
         cmdListNotifications(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "clear-notifications")) {
-        cmdClearNotifications();
+        cmdClearNotifications(args);
         Server.respond(client_fd, "ok");
     } else if (std.mem.eql(u8, command, "notify")) {
         cmdNotify(args, client_fd);
@@ -296,8 +296,21 @@ fn cmdListNotifications(alloc: Allocator, client_fd: posix.fd_t) void {
     }
 }
 
-fn cmdClearNotifications() void {
+fn cmdClearNotifications(args: []const u8) void {
     const store = notification_store.getGlobal() orelse return;
+
+    // Support --workspace=ID
+    if (std.mem.indexOf(u8, args, "--workspace=")) |pos| {
+        const start = pos + "--workspace=".len;
+        const end = std.mem.indexOfPos(u8, args, start, " ") orelse args.len;
+        const ws_id = std.fmt.parseInt(u64, args[start..end], 10) catch {
+            store.clear(null);
+            return;
+        };
+        store.clearByWorkspace(ws_id);
+        return;
+    }
+
     store.clear(null);
 }
 
@@ -326,25 +339,47 @@ fn cmdReadScreen(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t)
 }
 
 fn cmdNotify(args: []const u8, client_fd: posix.fd_t) void {
-    // Format: notify <title> [body]
-    // Title and body are separated by first space
+    // Format: notify [--subtitle=X] <title> [body]
     if (args.len == 0) {
         Server.respond(client_fd, "error: notify requires a title");
         return;
     }
 
-    var title: []const u8 = args;
+    var subtitle: []const u8 = "";
+    var remaining: []const u8 = args;
+
+    // Extract --subtitle=X flag
+    if (std.mem.indexOf(u8, args, "--subtitle=")) |pos| {
+        const start = pos + "--subtitle=".len;
+        const end = std.mem.indexOfPos(u8, args, start, " ") orelse args.len;
+        subtitle = args[start..end];
+        // Remove the flag from remaining args
+        if (end < args.len) {
+            remaining = std.mem.trim(u8, args[end + 1 ..], &[_]u8{ ' ', '\t' });
+        } else if (pos > 0) {
+            remaining = std.mem.trim(u8, args[0 .. pos - 1], &[_]u8{ ' ', '\t' });
+        } else {
+            remaining = "";
+        }
+    }
+
+    if (remaining.len == 0) {
+        Server.respond(client_fd, "error: notify requires a title");
+        return;
+    }
+
+    var title: []const u8 = remaining;
     var body: []const u8 = "";
-    if (std.mem.indexOf(u8, args, " ")) |space_pos| {
-        title = args[0..space_pos];
-        body = std.mem.trim(u8, args[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
+    if (std.mem.indexOf(u8, remaining, " ")) |space_pos| {
+        title = remaining[0..space_pos];
+        body = std.mem.trim(u8, remaining[space_pos + 1 ..], &[_]u8{ ' ', '\t' });
     }
 
     const store = notification_store.getGlobal() orelse {
         Server.respond(client_fd, "error: notification store not initialized");
         return;
     };
-    store.add(title, body, 0); // surface_id 0 = manual notification
+    store.addFull(title, subtitle, body, 0, 0);
     Server.respond(client_fd, "ok");
 }
 
@@ -1031,6 +1066,240 @@ fn cmdMarkdown(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     Server.respond(client_fd, std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0");
     _ = alloc;
+}
+
+// --- Phase 2: Previously stubbed and missing commands ---
+
+fn cmdReorderWorkspace(args: []const u8, client_fd: posix.fd_t) void {
+    // Format: reorder-workspace <id> <new_index>
+    const space = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: reorder-workspace <id> <index>");
+        return;
+    };
+    const id = std.fmt.parseInt(u64, args[0..space], 10) catch {
+        Server.respond(client_fd, "error: invalid workspace id");
+        return;
+    };
+    const new_index = std.fmt.parseInt(usize, std.mem.trim(u8, args[space + 1 ..], &[_]u8{ ' ', '\t' }), 10) catch {
+        Server.respond(client_fd, "error: invalid index");
+        return;
+    };
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: no workspace manager");
+        return;
+    };
+    if (mgr.reorder(id, new_index)) {
+        Server.respond(client_fd, "ok");
+    } else {
+        Server.respond(client_fd, "error: workspace not found");
+    }
+}
+
+fn cmdRefreshSurfaces(app: *gtk.Application) void {
+    const windows = app.getWindows();
+    var node: ?*glib.List = windows;
+    while (node) |n| {
+        if (n.f_data) |data| {
+            const widget: *gtk.Widget = @ptrCast(@alignCast(data));
+            widget.queueDraw();
+        }
+        node = n.f_next;
+    }
+}
+
+fn cmdSendPanel(_: *gtk.Application, _: Allocator, args: []const u8, client_fd: posix.fd_t) void {
+    // Format: send-panel --id=ID text
+    // For now, equivalent to send (targets active surface)
+    // TODO: look up specific surface by ID
+    const text_start = std.mem.indexOf(u8, args, " ") orelse {
+        Server.respond(client_fd, "error: usage: send-panel --id=ID text");
+        return;
+    };
+    _ = args[0..text_start]; // skip --id=X
+    const text = std.mem.trim(u8, args[text_start + 1 ..], &[_]u8{ ' ', '\t' });
+    if (text.len == 0) {
+        Server.respond(client_fd, "error: no text to send");
+        return;
+    }
+    // Fall back to active surface for now
+    Server.respond(client_fd, "error: send-panel by ID not yet supported — use send");
+}
+
+fn cmdSendKeyPanel(_: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    _ = args;
+    Server.respond(client_fd, "error: send-key-panel by ID not yet supported — use send-key");
+}
+
+fn cmdFocusPanel(_: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    _ = args;
+    // TODO: implement panel lookup by ID and focus
+    Server.respond(client_fd, "error: focus-panel by ID not yet supported");
+}
+
+fn cmdSurfaceHealth(app: *gtk.Application, client_fd: posix.fd_t) void {
+    const surface = getActiveSurface(app) orelse {
+        Server.respond(client_fd, "dead");
+        return;
+    };
+    _ = surface;
+    Server.respond(client_fd, "alive");
+}
+
+fn cmdListPaneSurfaces(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+    // List tab pages in the active window's tab view
+    const active_gtk_window = app.getActiveWindow() orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        Server.respond(client_fd, "");
+        return;
+    };
+    const tab_view = window.getTabView();
+    const n: usize = @intCast(@max(0, tab_view.getNPages()));
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const page = tab_view.getNthPage(@intCast(i));
+        if (i > 0) writer.writeAll("\n") catch return;
+        writer.print("{d}\t{s}", .{ i, std.mem.sliceTo(page.getTitle(), 0) }) catch return;
+    }
+
+    if (buf.items.len == 0) {
+        Server.respond(client_fd, "");
+    } else {
+        _ = posix.write(client_fd, buf.items) catch {};
+    }
+}
+
+fn cmdWorkspaceAction(args: []const u8, client_fd: posix.fd_t) void {
+    const mgr = workspace_mgr.getGlobal() orelse {
+        Server.respond(client_fd, "error: no workspace manager");
+        return;
+    };
+    mgr.mutex.lock();
+    defer mgr.mutex.unlock();
+
+    if (mgr.workspaces.items.len == 0) {
+        Server.respond(client_fd, "error: no workspaces");
+        return;
+    }
+
+    // Find current workspace index
+    var current_idx: usize = 0;
+    for (mgr.workspaces.items, 0..) |ws, i| {
+        if (ws.id == mgr.active_id) {
+            current_idx = i;
+            break;
+        }
+    }
+
+    const total = mgr.workspaces.items.len;
+    var target_idx: usize = current_idx;
+
+    if (std.mem.eql(u8, args, "next")) {
+        target_idx = (current_idx + 1) % total;
+    } else if (std.mem.eql(u8, args, "previous") or std.mem.eql(u8, args, "prev")) {
+        target_idx = if (current_idx == 0) total - 1 else current_idx - 1;
+    } else if (std.mem.eql(u8, args, "last")) {
+        target_idx = total - 1;
+    } else {
+        Server.respond(client_fd, "error: usage: workspace-action next|previous|last");
+        return;
+    }
+
+    mgr.active_id = mgr.workspaces.items[target_idx].id;
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdTabAction(app: *gtk.Application, args: []const u8, client_fd: posix.fd_t) void {
+    const active_gtk_window = app.getActiveWindow() orelse {
+        Server.respond(client_fd, "error: no active window");
+        return;
+    };
+    const window = gobject.ext.cast(Window, active_gtk_window) orelse {
+        Server.respond(client_fd, "error: no cmux window");
+        return;
+    };
+    const tab_view = window.getTabView();
+    const n = tab_view.getNPages();
+    if (n <= 0) {
+        Server.respond(client_fd, "error: no tabs");
+        return;
+    }
+
+    const current_page = tab_view.getSelectedPage() orelse {
+        Server.respond(client_fd, "error: no selected page");
+        return;
+    };
+    const current_pos = tab_view.getPagePosition(current_page);
+
+    if (std.mem.eql(u8, args, "next")) {
+        const next_pos = @mod(current_pos + 1, n);
+        const next_page = tab_view.getNthPage(next_pos);
+        tab_view.setSelectedPage(next_page);
+    } else if (std.mem.eql(u8, args, "previous") or std.mem.eql(u8, args, "prev")) {
+        const prev_pos = if (current_pos == 0) n - 1 else current_pos - 1;
+        const prev_page = tab_view.getNthPage(prev_pos);
+        tab_view.setSelectedPage(prev_page);
+    } else if (std.mem.eql(u8, args, "last")) {
+        const last_page = tab_view.getNthPage(n - 1);
+        tab_view.setSelectedPage(last_page);
+    } else {
+        Server.respond(client_fd, "error: usage: tab-action next|previous|last");
+        return;
+    }
+
+    Server.respond(client_fd, "ok");
+}
+
+fn cmdDebugTerminals(app: *gtk.Application, alloc: Allocator, client_fd: posix.fd_t) void {
+    const windows = app.getWindows();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    writer.writeAll("--- cmux debug: terminal tree ---\n") catch return;
+
+    var win_count: usize = 0;
+    var node: ?*glib.List = windows;
+    while (node) |n| {
+        if (n.f_data) |data| {
+            writer.print("Window {d}: {x}\n", .{ win_count, @intFromPtr(data) }) catch return;
+            if (gobject.ext.cast(Window, @as(*gtk.Window, @ptrCast(@alignCast(data))))) |window| {
+                const tab_view = window.getTabView();
+                const pages: usize = @intCast(@max(0, tab_view.getNPages()));
+                writer.print("  Tabs: {d}\n", .{pages}) catch return;
+                var t: usize = 0;
+                while (t < pages) : (t += 1) {
+                    const page = tab_view.getNthPage(@intCast(t));
+                    writer.print("    Tab {d}: {s}\n", .{ t, std.mem.sliceTo(page.getTitle(), 0) }) catch return;
+                }
+            }
+            win_count += 1;
+        }
+        node = n.f_next;
+    }
+
+    if (buf.items.len == 0) {
+        Server.respond(client_fd, "(no windows)");
+    } else {
+        _ = posix.write(client_fd, buf.items) catch {};
+    }
+}
+
+fn cmdUnreadCount(client_fd: posix.fd_t) void {
+    const store = notification_store.getGlobal() orelse {
+        Server.respond(client_fd, "0");
+        return;
+    };
+    var count_buf: [20]u8 = undefined;
+    Server.respond(client_fd, std.fmt.bufPrint(&count_buf, "{d}", .{store.unreadCount()}) catch "0");
 }
 
 // --- Claude Hook / Agent Session Commands ---

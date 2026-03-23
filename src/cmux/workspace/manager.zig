@@ -20,6 +20,11 @@ pub const Workspace = struct {
     id: u64,
     name: []const u8,
     cwd: ?[]const u8 = null,
+    custom_color: ?[]const u8 = null, // hex color e.g. "#C0392B"
+    is_pinned: bool = false,
+    focused_panel_id: ?u64 = null,
+    git_branch: ?[]const u8 = null, // current branch name
+    is_dirty: bool = false, // uncommitted changes
     created_at: i64,
     status: WorkspaceStatus,
 };
@@ -40,6 +45,8 @@ pub const Manager = struct {
         for (self.workspaces.items) |*ws| {
             self.alloc.free(ws.name);
             if (ws.cwd) |cwd| self.alloc.free(cwd);
+            if (ws.custom_color) |c| self.alloc.free(c);
+            if (ws.git_branch) |b| self.alloc.free(b);
             ws.status.deinit();
         }
         self.workspaces.deinit(self.alloc);
@@ -123,6 +130,8 @@ pub const Manager = struct {
             if (ws.id == id) {
                 self.alloc.free(ws.name);
                 if (ws.cwd) |cwd| self.alloc.free(cwd);
+                if (ws.custom_color) |c| self.alloc.free(c);
+                if (ws.git_branch) |b| self.alloc.free(b);
                 ws.status.deinit();
                 _ = self.workspaces.orderedRemove(i);
 
@@ -166,6 +175,48 @@ pub const Manager = struct {
         return true;
     }
 
+    /// Set the custom color for a workspace.
+    pub fn setColor(self: *Manager, id: u64, color: ?[]const u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.workspaces.items) |*ws| {
+            if (ws.id == id) {
+                if (ws.custom_color) |old| self.alloc.free(old);
+                ws.custom_color = if (color) |c| try self.alloc.dupe(u8, c) else null;
+                return;
+            }
+        }
+    }
+
+    /// Set the pinned state for a workspace.
+    pub fn setPinned(self: *Manager, id: u64, pinned: bool) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.workspaces.items) |*ws| {
+            if (ws.id == id) {
+                ws.is_pinned = pinned;
+                return;
+            }
+        }
+    }
+
+    /// Set the git branch info for a workspace.
+    pub fn setGitBranch(self: *Manager, id: u64, branch: ?[]const u8, is_dirty: bool) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.workspaces.items) |*ws| {
+            if (ws.id == id) {
+                if (ws.git_branch) |old| self.alloc.free(old);
+                ws.git_branch = if (branch) |b| try self.alloc.dupe(u8, b) else null;
+                ws.is_dirty = is_dirty;
+                return;
+            }
+        }
+    }
+
     /// Get the status store for a workspace (must hold mutex or call with lock).
     pub fn getStatus(self: *Manager, id: u64) ?*WorkspaceStatus {
         for (self.workspaces.items) |*ws| {
@@ -192,12 +243,23 @@ pub const Manager = struct {
         for (self.workspaces.items, 0..) |ws, i| {
             if (i > 0) try writer.writeAll(",");
             try writer.print(
-                \\{{"id":{d},"name":"{s}","active":{s}}}
+                \\{{"id":{d},"name":"{s}","active":{s},"pinned":{s}
             , .{
                 ws.id,
                 ws.name,
                 if (ws.id == self.active_id) "true" else "false",
+                if (ws.is_pinned) "true" else "false",
             });
+            if (ws.custom_color) |color| {
+                try writer.print(",\"color\":\"{s}\"", .{color});
+            }
+            if (ws.git_branch) |branch| {
+                try writer.print(",\"gitBranch\":\"{s}\",\"isDirty\":{s}", .{
+                    branch,
+                    if (ws.is_dirty) "true" else "false",
+                });
+            }
+            try writer.writeAll("}");
         }
         try writer.writeAll("]");
 
