@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // cmux module: AI coding agent terminal features built on Ghostty.
 // This module provides the socket control API, notification system,
@@ -16,6 +16,8 @@ pub const workspace = @import("workspace/manager.zig");
 pub const workspace_status = @import("workspace/status.zig");
 pub const port_scanner = @import("workspace/port_scanner.zig");
 pub const git_info = @import("workspace/git_info.zig");
+pub const ssh_detector = @import("workspace/ssh_detector.zig");
+pub const tmux_compat = @import("socket/tmux_compat.zig");
 pub const session = @import("session/persistence.zig");
 pub const browser = @import("browser/panel.zig");
 pub const markdown = @import("markdown/panel.zig");

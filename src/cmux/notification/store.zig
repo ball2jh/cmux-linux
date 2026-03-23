@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // In-memory notification store for cmux.
 // Captures OSC 9/99/777 notifications from terminal surfaces and makes

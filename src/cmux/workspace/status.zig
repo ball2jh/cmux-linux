@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // Workspace sidebar metadata: status entries, progress bars, and log entries.
 // These are displayed in the workspace sidebar and controlled via socket API.

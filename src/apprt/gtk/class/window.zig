@@ -38,6 +38,7 @@ var cmux_sidebar_timer: c_uint = 0;
 var cmux_sidebar_stack: ?*gtk.Stack = null;
 var cmux_sidebar_paned: ?*gtk.Paned = null;
 var cmux_sidebar_visible: bool = true;
+var cmux_notif_box: ?*gtk.Box = null;
 
 pub const Window = extern struct {
     const Self = @This();
@@ -634,6 +635,7 @@ pub const Window = extern struct {
             }
         }
 
+        cmux_notif_box = notif_box;
         notif_scrolled.setChild(notif_box.as(gtk.Widget));
         _ = stack.addNamed(notif_scrolled.as(gtk.Widget), "notifications");
 
@@ -819,6 +821,62 @@ pub const Window = extern struct {
             }
 
             sidebar_list.append(row_box.as(gtk.Widget));
+        }
+
+        // Also refresh notification panel
+        if (cmux_notif_box) |nbox| {
+            // Clear existing children
+            while (nbox.as(gtk.Widget).getFirstChild()) |child| {
+                nbox.remove(child);
+            }
+
+            if (notification_store.getGlobal()) |store| {
+                store.mutex.lock();
+                defer store.mutex.unlock();
+
+                if (store.entries.items.len == 0) {
+                    const empty_label = gtk.Label.new("No notifications");
+                    empty_label.as(gtk.Widget).addCssClass("cmux-notification-empty");
+                    nbox.append(empty_label.as(gtk.Widget));
+                } else {
+                    for (store.entries.items) |entry| {
+                        const notif_row = gtk.Box.new(.horizontal, 8);
+                        notif_row.as(gtk.Widget).addCssClass("cmux-notification-row");
+
+                        if (!entry.read) {
+                            const dot = gtk.Label.new("");
+                            dot.as(gtk.Widget).addCssClass("cmux-notification-unread-dot");
+                            dot.as(gtk.Widget).setValign(.start);
+                            dot.as(gtk.Widget).setMarginTop(6);
+                            notif_row.append(dot.as(gtk.Widget));
+                        }
+
+                        const content_box = gtk.Box.new(.vertical, 4);
+                        content_box.as(gtk.Widget).setHexpand(1);
+
+                        var title_buf: [128]u8 = undefined;
+                        const title_z = std.fmt.bufPrintZ(&title_buf, "{s}", .{entry.title}) catch "";
+                        const title_label = gtk.Label.new(title_z);
+                        title_label.as(gtk.Widget).addCssClass("cmux-notification-title");
+                        title_label.as(gtk.Widget).setHalign(.start);
+                        title_label.setEllipsize(.end);
+                        content_box.append(title_label.as(gtk.Widget));
+
+                        if (entry.body.len > 0) {
+                            var body_buf: [256]u8 = undefined;
+                            const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{entry.body}) catch "";
+                            const body_label = gtk.Label.new(body_z);
+                            body_label.as(gtk.Widget).addCssClass("cmux-notification-body");
+                            body_label.as(gtk.Widget).setHalign(.start);
+                            body_label.setEllipsize(.end);
+                            content_box.append(body_label.as(gtk.Widget));
+                        }
+
+                        notif_row.append(content_box.as(gtk.Widget));
+                        nbox.append(notif_row.as(gtk.Widget));
+                    }
+                }
+            }
         }
 
         return 1; // Keep timer

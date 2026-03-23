@@ -4,11 +4,23 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
 
+const build_config = @import("../build_config.zig");
+
 const log = std.log.scoped(.config);
 
 /// Default path for the XDG home configuration file. Returned value
 /// must be freed by the caller.
 pub fn defaultXdgPath(alloc: Allocator) ![]const u8 {
+    // cmux: check ~/.config/cmux/config first
+    if (comptime build_config.cmux) {
+        const cmux_path = try internal_os.xdg.config(alloc, .{ .subdir = "cmux/config" });
+        if (open(cmux_path)) |f| {
+            f.close();
+            return cmux_path;
+        } else |_| {
+            alloc.free(cmux_path);
+        }
+    }
     return try internal_os.xdg.config(
         alloc,
         .{ .subdir = "ghostty/config.ghostty" },

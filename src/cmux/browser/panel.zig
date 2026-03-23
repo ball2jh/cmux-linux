@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // Browser panel for cmux.
 // Embeds a WebKitGTK web view. Tracks URL state and provides

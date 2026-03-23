@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // cmux CLI: connects to the cmux socket and sends commands.
 // Usage: cmux +ctl <command> [args...]

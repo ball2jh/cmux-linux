@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // V1 text protocol handler for the cmux socket API.
 // Commands are newline-delimited text. Compatible with the macOS cmux
@@ -24,6 +24,8 @@ const WorkspaceStatus = @import("../workspace/status.zig").WorkspaceStatus;
 const Binding = @import("../../input/Binding.zig");
 const port_scanner = @import("../workspace/port_scanner.zig");
 const markdown = @import("../markdown/panel.zig");
+const ssh_detector = @import("../workspace/ssh_detector.zig");
+const tmux_compat = @import("tmux_compat.zig");
 
 const log = std.log.scoped(.cmux_v1);
 
@@ -154,7 +156,21 @@ pub fn handleCommand(
     } else if (std.mem.eql(u8, command, "set-app-focus")) {
         Server.respond(client_fd, "ok"); // stub
     } else if (std.mem.eql(u8, command, "simulate-app-active")) {
-        Server.respond(client_fd, "ok"); // stub
+        Server.respond(client_fd, "ok");
+    } else if (std.mem.eql(u8, command, "__tmux-compat")) {
+        if (args.len > 0) {
+            var tmux_cmd: []const u8 = args;
+            var tmux_args: []const u8 = "";
+            if (std.mem.indexOf(u8, args, " ")) |sp| {
+                tmux_cmd = args[0..sp];
+                tmux_args = std.mem.trim(u8, args[sp + 1 ..], &[_]u8{ ' ', '\t' });
+            }
+            tmux_compat.handleTmuxCommand(ctx, alloc, tmux_cmd, tmux_args, client_fd);
+        } else {
+            Server.respond(client_fd, "error: usage: __tmux-compat <command> [args]");
+        }
+    } else if (std.mem.eql(u8, command, "ssh")) {
+        cmdSshDetect(alloc, client_fd);
     } else if (std.mem.eql(u8, command, "quit")) {
         cmdQuit(app);
         Server.respond(client_fd, "ok");
@@ -885,6 +901,15 @@ fn cmdBrowserReload(args: []const u8, client_fd: posix.fd_t) void {
         }
     }
     Server.respond(client_fd, "error: no browser widget");
+}
+
+fn cmdSshDetect(alloc: Allocator, client_fd: posix.fd_t) void {
+    const json = ssh_detector.formatJson(alloc) catch {
+        Server.respond(client_fd, "[]");
+        return;
+    };
+    defer alloc.free(json);
+    Server.respond(client_fd, json);
 }
 
 fn cmdMarkdown(alloc: Allocator, args: []const u8, client_fd: posix.fd_t) void {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2025 cmux-linux contributors
+// Copyright (c) 2026 cmux-linux contributors
 //
 // V2 JSON-RPC protocol handler for the cmux socket API.
 // Requests are newline-delimited JSON:
