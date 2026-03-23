@@ -189,15 +189,15 @@ fn dispatch(
     } else if (std.mem.eql(u8, method, "browser.frame.list")) {
         v2BrowserRunJs(alloc, params, client_fd, "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(function(f,i){return {id:i,src:f.src,name:f.name}}))");
     } else if (std.mem.eql(u8, method, "browser.geolocation.set")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserGeolocationSet(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.offline.set")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserOfflineSet(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.dialog.accept")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserDialogAction(alloc, true, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.dialog.dismiss")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserDialogAction(alloc, false, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.download.wait")) {
-        respondOkString(alloc, client_fd, id, "ok");
+        v2BrowserDownloadWait(alloc, id, client_fd);
     } else if (std.mem.eql(u8, method, "browser.open_split")) {
         v2BrowserOpen(alloc, params, id, client_fd);
     } else if (std.mem.eql(u8, method, "surface.move")) {
@@ -748,6 +748,78 @@ fn v2BrowserCookieClearNative(alloc: Allocator, params: ?std.json.Value, client_
     Server.respond(client_fd, "cleared");
 }
 
+fn v2BrowserGeolocationSet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const lat = getParamFloat(params, "latitude") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing latitude");
+        return;
+    };
+    const lng = getParamFloat(params, "longitude") orelse {
+        respondError(alloc, client_fd, id, "invalid_params", "missing longitude");
+        return;
+    };
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.setGeolocation(w, lat, lng);
+            respondOkString(alloc, client_fd, id, "set");
+            return;
+        }
+    }
+    respondError(alloc, client_fd, id, "no_browser", "no browser widget");
+}
+
+fn v2BrowserOfflineSet(alloc: Allocator, params: ?std.json.Value, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const offline = if (params) |p| blk: {
+        if (p.object.get("offline")) |v| {
+            break :blk switch (v) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        break :blk true;
+    } else true;
+    const panel_id = if (params) |p| (getParamInt(p, "id") orelse 0) else 0;
+
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (browser_panel.getWidget(@intCast(panel_id))) |w| {
+            webkit.setOffline(w, offline);
+            respondOkString(alloc, client_fd, id, if (offline) "offline" else "online");
+            return;
+        }
+    }
+    respondError(alloc, client_fd, id, "no_browser", "no browser widget");
+}
+
+fn v2BrowserDialogAction(alloc: Allocator, accept: bool, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (accept) {
+            webkit.acceptDialog();
+        } else {
+            webkit.dismissDialog();
+        }
+    }
+    respondOkString(alloc, client_fd, id, if (accept) "accepted" else "dismissed");
+}
+
+fn v2BrowserDownloadWait(alloc: Allocator, id: ?std.json.Value, client_fd: posix.fd_t) void {
+    const build_config = @import("../../build_config.zig");
+    if (comptime build_config.cmux) {
+        const webkit = @import("../browser/webkit.zig");
+        if (webkit.isDownloadComplete()) {
+            respondOkString(alloc, client_fd, id, "complete");
+            return;
+        }
+    }
+    respondOkString(alloc, client_fd, id, "waiting");
+}
+
 fn v2BrowserStorageGet(alloc: Allocator, params: ?std.json.Value, client_fd: posix.fd_t) void {
     const key = getParamString(params, "key") orelse {
         // Return all storage
@@ -816,6 +888,18 @@ fn getParamInt(params: ?std.json.Value, key: []const u8) ?u64 {
     const v = p.object.get(key) orelse return null;
     return switch (v) {
         .integer => |n| @intCast(@max(0, n)),
+        else => null,
+    };
+}
+
+/// Extract a float parameter from JSON params.
+fn getParamFloat(params: ?std.json.Value, key: []const u8) ?f64 {
+    const p = params orelse return null;
+    if (p != .object) return null;
+    const v = p.object.get(key) orelse return null;
+    return switch (v) {
+        .float => |f| f,
+        .integer => |n| @floatFromInt(n),
         else => null,
     };
 }

@@ -416,6 +416,171 @@ fn cookieClearCallback(
     }
 }
 
+// === Geolocation (native WebKitGeolocationManager API) ===
+
+/// Set a fake geolocation position.
+pub fn setGeolocation(widget: *gtk.Widget, latitude: f64, longitude: f64) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const session = c.webkit_web_view_get_network_session(web_view) orelse return;
+    // Get geolocation manager from the web context
+    _ = session;
+    // WebKitGeolocationManager is accessed via WebKitWebContext, not session
+    const context = c.webkit_web_view_get_context(web_view);
+    if (context == null) return;
+    const geo_mgr = c.webkit_web_context_get_geolocation_manager(context);
+    if (geo_mgr == null) return;
+
+    const position = c.webkit_geolocation_position_new(latitude, longitude, 100.0); // 100m accuracy
+    if (position == null) return;
+    defer c.webkit_geolocation_position_free(position);
+
+    c.webkit_geolocation_manager_update_position(geo_mgr, position);
+    log.info("geolocation set to ({d}, {d})", .{ latitude, longitude });
+}
+
+// === Network/Offline (native WebKitNetworkProxySettings API) ===
+
+/// Set offline mode by configuring proxy to block all requests.
+pub fn setOffline(widget: *gtk.Widget, offline: bool) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    const session = c.webkit_web_view_get_network_session(web_view) orelse return;
+
+    if (offline) {
+        // Set proxy to a non-existent proxy to simulate offline
+        c.webkit_network_session_set_proxy_settings(
+            session,
+            c.WEBKIT_NETWORK_PROXY_MODE_CUSTOM,
+            null, // null settings with CUSTOM mode = no connection
+        );
+    } else {
+        // Restore default proxy
+        c.webkit_network_session_set_proxy_settings(
+            session,
+            c.WEBKIT_NETWORK_PROXY_MODE_DEFAULT,
+            null,
+        );
+    }
+    log.info("offline mode: {}", .{offline});
+}
+
+// === Script Dialogs (native WebKitScriptDialog API) ===
+
+/// State for pending dialog responses.
+var pending_dialog_action: enum { none, accept, dismiss } = .none;
+var pending_dialog: ?*c.WebKitScriptDialog = null;
+
+/// Connect the script-dialog signal on a web view.
+pub fn connectDialogSignal(widget: *gtk.Widget) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    _ = c.g_signal_connect_data(
+        @ptrCast(web_view),
+        "script-dialog",
+        @ptrCast(&onScriptDialog),
+        null,
+        null,
+        0,
+    );
+}
+
+fn onScriptDialog(
+    _: *c.WebKitWebView,
+    dialog: *c.WebKitScriptDialog,
+    _: ?*anyopaque,
+) callconv(.c) c_int {
+    // Store the dialog reference for accept/dismiss commands
+    pending_dialog = c.webkit_script_dialog_ref(dialog);
+
+    // If there's a pending action, apply it immediately
+    switch (pending_dialog_action) {
+        .accept => {
+            c.webkit_script_dialog_confirm_set_confirmed(dialog, 1);
+            c.webkit_script_dialog_close(dialog);
+            pending_dialog_action = .none;
+        },
+        .dismiss => {
+            c.webkit_script_dialog_confirm_set_confirmed(dialog, 0);
+            c.webkit_script_dialog_close(dialog);
+            pending_dialog_action = .none;
+        },
+        .none => {},
+    }
+
+    return 1; // Handled
+}
+
+/// Accept the next dialog.
+pub fn acceptDialog() void {
+    if (pending_dialog) |dialog| {
+        c.webkit_script_dialog_confirm_set_confirmed(dialog, 1);
+        c.webkit_script_dialog_close(dialog);
+        c.webkit_script_dialog_unref(dialog);
+        pending_dialog = null;
+    } else {
+        pending_dialog_action = .accept;
+    }
+}
+
+/// Dismiss the next dialog.
+pub fn dismissDialog() void {
+    if (pending_dialog) |dialog| {
+        c.webkit_script_dialog_confirm_set_confirmed(dialog, 0);
+        c.webkit_script_dialog_close(dialog);
+        c.webkit_script_dialog_unref(dialog);
+        pending_dialog = null;
+    } else {
+        pending_dialog_action = .dismiss;
+    }
+}
+
+// === Downloads (native WebKitDownload API) ===
+
+/// State for tracking the current download.
+var download_complete: bool = false;
+var download_path: ?[*:0]const u8 = null;
+
+/// Wait for the next download to complete. Connects to download-started signal.
+pub fn setupDownloadTracking(widget: *gtk.Widget) void {
+    const web_view: *c.WebKitWebView = @ptrCast(@alignCast(widget));
+    _ = c.g_signal_connect_data(
+        @ptrCast(web_view),
+        "download-started",
+        @ptrCast(&onDownloadStarted),
+        null,
+        null,
+        0,
+    );
+}
+
+fn onDownloadStarted(
+    _: *c.WebKitWebView,
+    download: *c.WebKitDownload,
+    _: ?*anyopaque,
+) callconv(.c) void {
+    download_complete = false;
+    _ = c.g_signal_connect_data(
+        @ptrCast(download),
+        "finished",
+        @ptrCast(&onDownloadFinished),
+        null,
+        null,
+        0,
+    );
+}
+
+fn onDownloadFinished(
+    download: *c.WebKitDownload,
+    _: ?*anyopaque,
+) callconv(.c) void {
+    download_path = c.webkit_download_get_destination(download);
+    download_complete = true;
+    log.info("download completed", .{});
+}
+
+/// Check if the last download completed.
+pub fn isDownloadComplete() bool {
+    return download_complete;
+}
+
 /// Get the page source HTML via JavaScript.
 pub fn getPageSource(
     widget: *gtk.Widget,
