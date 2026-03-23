@@ -378,50 +378,144 @@ pub const Window = extern struct {
         const sidebar_widget = sidebar.as(gtk.Widget);
         sidebar_widget.addCssClass("cmux-workspace-sidebar");
         sidebar_widget.setSizeRequest(200, -1);
+        sidebar.setSelectionMode(.single);
 
         // Add workspace entries from the workspace manager
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const notification_store = @import("../../../cmux/notification/store.zig");
+        const port_scanner = @import("../../../cmux/workspace/port_scanner.zig");
+
         if (cmux_ws.getGlobal()) |mgr| {
             mgr.mutex.lock();
             defer mgr.mutex.unlock();
 
             for (mgr.workspaces.items) |ws| {
-                // Create a vertical box for each workspace row
-                const row_box = gtk.Box.new(.vertical, 2);
-                const row_widget = row_box.as(gtk.Widget);
+                // === Row container: vertical box, 1px spacing ===
+                const row_box = gtk.Box.new(.vertical, 1);
+                row_box.as(gtk.Widget).addCssClass("cmux-ws-row");
 
-                // Workspace name
+                // === Top line: HBox with name + badge ===
+                const top_hbox = gtk.Box.new(.horizontal, 4);
+                top_hbox.as(gtk.Widget).setHexpand(1);
+
+                // Workspace name (12.5pt semibold equivalent)
                 const name_label = gtk.Label.new(@ptrCast(ws.name.ptr));
                 const name_widget = name_label.as(gtk.Widget);
                 name_widget.addCssClass("cmux-ws-name");
                 name_widget.setHalign(.start);
-                row_box.append(name_widget);
+                name_widget.setHexpand(1);
+                name_label.setEllipsize(.end);
+                top_hbox.append(name_widget);
 
-                // Status summary (if any status entries exist)
-                if (ws.status.statuses.items.len > 0) {
-                    const first_status = ws.status.statuses.items[0];
+                // Notification badge (16px circle with count)
+                const unread = if (notification_store.getGlobal()) |s| s.unreadCount() else 0;
+                if (unread > 0) {
+                    var badge_buf: [8]u8 = undefined;
+                    const badge_text = std.fmt.bufPrintZ(&badge_buf, "{d}", .{unread}) catch "!";
+                    const badge_label = gtk.Label.new(badge_text);
+                    const badge_widget = badge_label.as(gtk.Widget);
+                    badge_widget.addCssClass("cmux-ws-badge");
+                    badge_widget.setHalign(.end);
+                    top_hbox.append(badge_widget);
+                }
+
+                row_box.append(top_hbox.as(gtk.Widget));
+
+                // === Status entries (key: value, 10pt) ===
+                for (ws.status.statuses.items) |status_entry| {
                     var status_buf: [128]u8 = undefined;
                     const status_text = std.fmt.bufPrintZ(&status_buf, "{s}: {s}", .{
-                        first_status.key, first_status.value,
-                    }) catch "...";
+                        status_entry.key, status_entry.value,
+                    }) catch continue;
                     const status_label = gtk.Label.new(status_text);
                     const status_widget = status_label.as(gtk.Widget);
                     status_widget.addCssClass("cmux-ws-status");
                     status_widget.setHalign(.start);
+                    status_label.setEllipsize(.end);
                     row_box.append(status_widget);
                 }
 
-                // Progress bar (if any)
-                if (ws.status.progress.items.len > 0) {
-                    const prog = ws.status.progress.items[0];
+                // === Progress bars (3pt height, accent fill) ===
+                for (ws.status.progress.items) |prog| {
+                    const prog_hbox = gtk.Box.new(.horizontal, 4);
+
                     const progress_bar = gtk.ProgressBar.new();
                     progress_bar.setFraction(prog.value);
                     const prog_widget = progress_bar.as(gtk.Widget);
                     prog_widget.addCssClass("cmux-sidebar-progress");
-                    row_box.append(prog_widget);
+                    prog_widget.setHexpand(1);
+                    prog_widget.setValign(.center);
+                    prog_hbox.append(prog_widget);
+
+                    // Progress percentage label (9pt)
+                    var pct_buf: [8]u8 = undefined;
+                    const pct_text = std.fmt.bufPrintZ(&pct_buf, "{d}%", .{@as(u32, @intFromFloat(prog.value * 100))}) catch "";
+                    if (pct_text.len > 0) {
+                        const pct_label = gtk.Label.new(pct_text);
+                        pct_label.as(gtk.Widget).addCssClass("cmux-ws-progress-label");
+                        prog_hbox.append(pct_label.as(gtk.Widget));
+                    }
+
+                    row_box.append(prog_hbox.as(gtk.Widget));
                 }
 
-                sidebar.append(row_widget);
+                // === Latest log entry (10pt mono, truncated) ===
+                if (ws.status.logs.items.len > 0) {
+                    const last_log = ws.status.logs.items[ws.status.logs.items.len - 1];
+                    var log_buf: [96]u8 = undefined;
+                    const log_text = std.fmt.bufPrintZ(&log_buf, "\xE2\x96\xB8 {s}", .{
+                        last_log.message,
+                    }) catch "";
+                    if (log_text.len > 0) {
+                        const log_label = gtk.Label.new(log_text);
+                        const log_widget = log_label.as(gtk.Widget);
+                        log_widget.addCssClass("cmux-ws-log");
+                        log_widget.setHalign(.start);
+                        log_label.setEllipsize(.end);
+                        row_box.append(log_widget);
+                    }
+                }
+
+                // === Listening ports (10pt mono) ===
+                const ports = port_scanner.getPorts();
+                if (ports.len > 0) {
+                    var ports_buf: [128]u8 = undefined;
+                    var ports_len: usize = 0;
+                    const max_show: usize = 4;
+                    for (ports[0..@min(ports.len, max_show)]) |p| {
+                        if (ports_len > 0) {
+                            if (ports_len < ports_buf.len - 1) {
+                                ports_buf[ports_len] = ' ';
+                                ports_len += 1;
+                            }
+                        }
+                        const written = std.fmt.bufPrint(ports_buf[ports_len..], ":{d}", .{p.port}) catch break;
+                        ports_len += written.len;
+                    }
+                    if (ports.len > max_show) {
+                        const more = std.fmt.bufPrint(ports_buf[ports_len..], " +{d}", .{ports.len - max_show}) catch "";
+                        ports_len += more.len;
+                    }
+                    if (ports_len > 0) {
+                        ports_buf[@min(ports_len, ports_buf.len - 1)] = 0;
+                        const ports_label = gtk.Label.new(@ptrCast(&ports_buf));
+                        const ports_widget = ports_label.as(gtk.Widget);
+                        ports_widget.addCssClass("cmux-ws-ports");
+                        ports_widget.setHalign(.start);
+                        ports_label.setEllipsize(.end);
+                        row_box.append(ports_widget);
+                    }
+                }
+
+                sidebar.append(row_box.as(gtk.Widget));
+
+                // Select the active workspace row
+                if (ws.id == mgr.active_id) {
+                    if (sidebar.getRowAtIndex(@intCast(mgr.workspaces.items.len - 1))) |row| {
+                        // Zig doesn't have direct selectRow, we'll use CSS class
+                        _ = row;
+                    }
+                }
             }
         }
 

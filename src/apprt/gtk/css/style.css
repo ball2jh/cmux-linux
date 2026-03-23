@@ -192,10 +192,11 @@ label.resize-overlay {
   min-width: 200px;
 }
 
+/* Row: macOS spec — padding 10h 8v, corner radius 6, margin 6h, spacing 2 */
 .cmux-workspace-sidebar row {
-  padding: 8px 12px;
-  margin: 2px 6px;
-  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 1px 6px;
+  border-radius: 6px;
   transition: background-color 150ms ease;
 }
 
@@ -203,18 +204,19 @@ label.resize-overlay {
   background-color: rgba(255, 255, 255, 0.06);
 }
 
+/* Active workspace: solid accent background, white text */
 .cmux-workspace-sidebar row:selected {
-  background-color: rgba(0, 145, 255, 0.25);
+  background-color: rgb(0, 145, 255);
 }
 
 .cmux-workspace-sidebar row:selected:hover {
-  background-color: rgba(0, 145, 255, 0.35);
+  background-color: rgb(10, 155, 255);
 }
 
-/* Workspace name */
-.cmux-workspace-sidebar .cmux-ws-name {
+/* Workspace name: macOS 12.5pt semibold */
+.cmux-ws-name {
   color: rgba(255, 255, 255, 0.92);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
 }
 
@@ -222,22 +224,71 @@ label.resize-overlay {
   color: white;
 }
 
-/* Status/metadata below workspace name */
-.cmux-workspace-sidebar .cmux-ws-status {
+/* Notification badge: macOS 16x16 circle, accent fill, white text */
+.cmux-ws-badge {
+  background-color: rgb(0, 145, 255);
+  color: white;
+  font-size: 9px;
+  font-weight: 600;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 8px;
+  padding: 0 4px;
+}
+
+.cmux-workspace-sidebar row:selected .cmux-ws-badge {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+/* Status entries: macOS 10pt, secondary color */
+.cmux-ws-status {
   color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
+  font-size: 10px;
 }
 
-.cmux-workspace-sidebar .cmux-ws-branch {
+.cmux-workspace-sidebar row:selected .cmux-ws-status {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Git branch: macOS 10pt monospace, accent tinted */
+.cmux-ws-branch {
   color: rgba(0, 145, 255, 0.8);
-  font-size: 11px;
+  font-size: 10px;
+  font-family: monospace;
 }
 
-/* Progress bar in sidebar */
+/* Latest log: macOS 10pt monospace */
+.cmux-ws-log {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.cmux-workspace-sidebar row:selected .cmux-ws-log {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Ports: macOS 10pt monospace */
+.cmux-ws-ports {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.cmux-workspace-sidebar row:selected .cmux-ws-ports {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* Progress label: macOS 9pt */
+.cmux-ws-progress-label {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 9px;
+}
+
+/* Progress bar: macOS 3pt height capsule, accent fill */
 .cmux-sidebar-progress {
   min-height: 3px;
   border-radius: 2px;
-  margin-top: 4px;
 }
 
 .cmux-sidebar-progress trough {
@@ -250,6 +301,14 @@ label.resize-overlay {
   background-color: rgb(0, 145, 255);
   min-height: 3px;
   border-radius: 2px;
+}
+
+.cmux-workspace-sidebar row:selected .cmux-sidebar-progress progress {
+  background-color: rgba(255, 255, 255, 0.8);
+}
+
+.cmux-workspace-sidebar row:selected .cmux-sidebar-progress trough {
+  background-color: rgba(255, 255, 255, 0.2);
 }
 
 /*
