@@ -407,34 +407,20 @@ label.resize-overlay {
 
 .cmux-sidebar-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 4px;
 }
 
-.cmux-sidebar-tab {
+/* Icon buttons in sidebar header (bell, +) */
+.cmux-header-btn {
   background: transparent;
   border: none;
   border-radius: 4px;
   color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 8px;
-  min-height: 24px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
 }
 
-.cmux-sidebar-tab:hover {
-  background-color: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.7);
-}
-
-.cmux-sidebar-tab:checked,
-.cmux-sidebar-tab.active {
-  background-color: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.92);
-}
-
-/*
- * cmux notification panel
- */
-.cmux-notification-panel {
-  padding: 8px;
+.cmux-header-btn:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
 }

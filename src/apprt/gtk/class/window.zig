@@ -40,6 +40,8 @@ var cmux_sidebar_paned: ?*gtk.Paned = null;
 var cmux_sidebar_visible: bool = true;
 var cmux_notif_box: ?*gtk.Box = null;
 var cmux_sidebar_last_hash: u64 = 0;
+// Maps workspace_id -> TabPage index for workspace-tab switching
+var cmux_window_ref: ?*gtk.Window = null;
 
 pub const Window = extern struct {
     const Self = @This();
@@ -382,6 +384,9 @@ pub const Window = extern struct {
         const toast_widget = priv.toast_overlay.as(gtk.Widget);
         const parent_widget = toast_widget.getParent() orelse return;
 
+        // Store window reference for workspace-tab switching
+        cmux_window_ref = self.as(gtk.Window);
+
         // Create the sidebar list box
         const sidebar = gtk.ListBox.new();
         const sidebar_widget = sidebar.as(gtk.Widget);
@@ -536,122 +541,44 @@ pub const Window = extern struct {
         sidebar_container.as(gtk.Widget).setSizeRequest(200, -1);
         sidebar_container.as(gtk.Widget).addCssClass("cmux-sidebar-container");
 
-        // --- Sidebar header with toggle buttons ---
-        const header_box = gtk.Box.new(.horizontal, 0);
+        // --- Sidebar header: icon buttons matching Mac cmux ---
+        const header_box = gtk.Box.new(.horizontal, 4);
         header_box.as(gtk.Widget).addCssClass("cmux-sidebar-header");
+        header_box.as(gtk.Widget).setMarginStart(8);
+        header_box.as(gtk.Widget).setMarginEnd(8);
+        header_box.as(gtk.Widget).setMarginTop(6);
+        header_box.as(gtk.Widget).setMarginBottom(4);
 
-        const ws_btn = gtk.ToggleButton.newWithLabel("Workspaces");
-        ws_btn.as(gtk.Widget).addCssClass("cmux-sidebar-tab");
-        ws_btn.as(gtk.Widget).addCssClass("active");
-        ws_btn.as(gtk.Widget).setHexpand(1);
-        ws_btn.setActive(1);
+        // Notification bell button (toggles notifications panel)
+        const bell_btn = gtk.Button.newFromIconName("bell-symbolic");
+        bell_btn.as(gtk.Widget).addCssClass("cmux-header-btn");
+        bell_btn.as(gtk.Widget).setTooltipText("Notifications");
 
-        const notif_btn = gtk.ToggleButton.newWithLabel("Notifications");
-        notif_btn.as(gtk.Widget).addCssClass("cmux-sidebar-tab");
-        notif_btn.as(gtk.Widget).setHexpand(1);
+        // New workspace "+" button
+        const add_btn = gtk.Button.newFromIconName("list-add-symbolic");
+        add_btn.as(gtk.Widget).addCssClass("cmux-header-btn");
+        add_btn.as(gtk.Widget).setTooltipText("New Workspace");
+        _ = gtk.Button.signals.clicked.connect(add_btn, *gtk.Button, &cmuxNewWorkspaceClicked, add_btn, .{});
 
-        // Sidebar toggle (hide/show) button
-        const toggle_sidebar_btn = gtk.Button.newFromIconName("sidebar-show-symbolic");
-        toggle_sidebar_btn.as(gtk.Widget).addCssClass("cmux-sidebar-toggle");
-        toggle_sidebar_btn.as(gtk.Widget).setTooltipText("Toggle Sidebar");
-        _ = gtk.Button.signals.clicked.connect(toggle_sidebar_btn, *gtk.Button, &cmuxToggleSidebarClicked, toggle_sidebar_btn, .{});
+        // Spacer to push buttons to the right
+        const spacer = gtk.Box.new(.horizontal, 0);
+        spacer.as(gtk.Widget).setHexpand(1);
 
-        header_box.append(toggle_sidebar_btn.as(gtk.Widget));
-        header_box.append(ws_btn.as(gtk.Widget));
-        header_box.append(notif_btn.as(gtk.Widget));
+        header_box.append(spacer.as(gtk.Widget));
+        header_box.append(bell_btn.as(gtk.Widget));
+        header_box.append(add_btn.as(gtk.Widget));
         sidebar_container.append(header_box.as(gtk.Widget));
 
-        // --- Stack with two pages ---
-        const stack = gtk.Stack.new();
-        stack.as(gtk.Widget).setHexpand(1);
-        stack.as(gtk.Widget).setVexpand(1);
-
-        // Page 1: Workspaces (scrolled)
+        // Workspace list in a scrolled window (no Stack — simpler, matches Mac)
         const ws_scrolled = gtk.ScrolledWindow.new();
         ws_scrolled.setChild(sidebar_widget);
         ws_scrolled.setPolicy(.never, .automatic);
-        _ = stack.addNamed(ws_scrolled.as(gtk.Widget), "workspaces");
+        ws_scrolled.as(gtk.Widget).setVexpand(1);
 
-        // Page 2: Notifications
-        const notif_scrolled = gtk.ScrolledWindow.new();
-        notif_scrolled.setPolicy(.never, .automatic);
-        const notif_box = gtk.Box.new(.vertical, 8);
-        notif_box.as(gtk.Widget).addCssClass("cmux-notification-panel");
-        notif_box.as(gtk.Widget).setMarginTop(8);
-        notif_box.as(gtk.Widget).setMarginStart(8);
-        notif_box.as(gtk.Widget).setMarginEnd(8);
-
-        // Build notification entries
-        if (notification_store.getGlobal()) |store| {
-            store.mutex.lock();
-            defer store.mutex.unlock();
-
-            if (store.entries.items.len == 0) {
-                // Empty state
-                const empty_label = gtk.Label.new("No notifications");
-                empty_label.as(gtk.Widget).addCssClass("cmux-notification-empty");
-                notif_box.append(empty_label.as(gtk.Widget));
-            } else {
-                for (store.entries.items) |entry| {
-                    const notif_row = gtk.Box.new(.horizontal, 8);
-                    notif_row.as(gtk.Widget).addCssClass("cmux-notification-row");
-
-                    // Unread dot (8px)
-                    if (!entry.read) {
-                        const dot = gtk.Label.new("");
-                        dot.as(gtk.Widget).addCssClass("cmux-notification-unread-dot");
-                        dot.as(gtk.Widget).setValign(.start);
-                        dot.as(gtk.Widget).setMarginTop(6);
-                        notif_row.append(dot.as(gtk.Widget));
-                    }
-
-                    // Content column
-                    const content_box = gtk.Box.new(.vertical, 4);
-                    content_box.as(gtk.Widget).setHexpand(1);
-
-                    // Title
-                    var title_buf: [128]u8 = undefined;
-                    const title_z = std.fmt.bufPrintZ(&title_buf, "{s}", .{entry.title}) catch "";
-                    const title_label = gtk.Label.new(title_z);
-                    title_label.as(gtk.Widget).addCssClass("cmux-notification-title");
-                    title_label.as(gtk.Widget).setHalign(.start);
-                    title_label.setEllipsize(.end);
-                    content_box.append(title_label.as(gtk.Widget));
-
-                    // Body
-                    if (entry.body.len > 0) {
-                        var body_buf: [256]u8 = undefined;
-                        const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{entry.body}) catch "";
-                        const body_label = gtk.Label.new(body_z);
-                        body_label.as(gtk.Widget).addCssClass("cmux-notification-body");
-                        body_label.as(gtk.Widget).setHalign(.start);
-                        body_label.setEllipsize(.end);
-                        body_label.setLines(3);
-                        content_box.append(body_label.as(gtk.Widget));
-                    }
-
-                    notif_row.append(content_box.as(gtk.Widget));
-                    notif_box.append(notif_row.as(gtk.Widget));
-                }
-            }
-        }
-
-        cmux_notif_box = notif_box;
-        notif_scrolled.setChild(notif_box.as(gtk.Widget));
-        _ = stack.addNamed(notif_scrolled.as(gtk.Widget), "notifications");
-
-        // Set initial page and store reference
-        stack.setVisibleChildName("workspaces");
-        cmux_sidebar_stack = stack;
-
-        // Connect toggle buttons to switch stack pages
-        _ = gtk.ToggleButton.signals.toggled.connect(ws_btn, *gtk.Stack, &cmuxWsTabToggled, stack, .{});
-        _ = gtk.ToggleButton.signals.toggled.connect(notif_btn, *gtk.Stack, &cmuxNotifTabToggled, stack, .{});
-
-        // Connect ListBox row selection to switch active workspace
+        // Connect ListBox row selection to switch active workspace + tab
         _ = gtk.ListBox.signals.row_selected.connect(sidebar, *gtk.ListBox, &cmuxWorkspaceRowSelected, sidebar, .{});
 
-        sidebar_container.append(stack.as(gtk.Widget));
+        sidebar_container.append(ws_scrolled.as(gtk.Widget));
 
         // Create a paned: sidebar | content
         const paned = gtk.Paned.new(.horizontal);
@@ -857,62 +784,6 @@ pub const Window = extern struct {
         // Visual DnD requires C-level GValue glue that the Zig GObject
         // bindings don't fully support yet.
 
-        // Also refresh notification panel
-        if (cmux_notif_box) |nbox| {
-            // Clear existing children
-            while (nbox.as(gtk.Widget).getFirstChild()) |child| {
-                nbox.remove(child);
-            }
-
-            if (notification_store.getGlobal()) |store| {
-                store.mutex.lock();
-                defer store.mutex.unlock();
-
-                if (store.entries.items.len == 0) {
-                    const empty_label = gtk.Label.new("No notifications");
-                    empty_label.as(gtk.Widget).addCssClass("cmux-notification-empty");
-                    nbox.append(empty_label.as(gtk.Widget));
-                } else {
-                    for (store.entries.items) |entry| {
-                        const notif_row = gtk.Box.new(.horizontal, 8);
-                        notif_row.as(gtk.Widget).addCssClass("cmux-notification-row");
-
-                        if (!entry.read) {
-                            const dot = gtk.Label.new("");
-                            dot.as(gtk.Widget).addCssClass("cmux-notification-unread-dot");
-                            dot.as(gtk.Widget).setValign(.start);
-                            dot.as(gtk.Widget).setMarginTop(6);
-                            notif_row.append(dot.as(gtk.Widget));
-                        }
-
-                        const content_box = gtk.Box.new(.vertical, 4);
-                        content_box.as(gtk.Widget).setHexpand(1);
-
-                        var title_buf: [128]u8 = undefined;
-                        const title_z = std.fmt.bufPrintZ(&title_buf, "{s}", .{entry.title}) catch "";
-                        const title_label = gtk.Label.new(title_z);
-                        title_label.as(gtk.Widget).addCssClass("cmux-notification-title");
-                        title_label.as(gtk.Widget).setHalign(.start);
-                        title_label.setEllipsize(.end);
-                        content_box.append(title_label.as(gtk.Widget));
-
-                        if (entry.body.len > 0) {
-                            var body_buf: [256]u8 = undefined;
-                            const body_z = std.fmt.bufPrintZ(&body_buf, "{s}", .{entry.body}) catch "";
-                            const body_label = gtk.Label.new(body_z);
-                            body_label.as(gtk.Widget).addCssClass("cmux-notification-body");
-                            body_label.as(gtk.Widget).setHalign(.start);
-                            body_label.setEllipsize(.end);
-                            content_box.append(body_label.as(gtk.Widget));
-                        }
-
-                        notif_row.append(content_box.as(gtk.Widget));
-                        nbox.append(notif_row.as(gtk.Widget));
-                    }
-                }
-            }
-        }
-
         return 1; // Keep timer
     }
 
@@ -928,17 +799,27 @@ pub const Window = extern struct {
         }
     }
 
-    /// Workspaces tab toggled — show workspaces page.
-    fn cmuxWsTabToggled(_: *gtk.ToggleButton, stack: *gtk.Stack) callconv(.c) void {
-        stack.setVisibleChildName("workspaces");
+    /// New workspace button clicked — create workspace + new tab.
+    fn cmuxNewWorkspaceClicked(_: *gtk.Button, _: *gtk.Button) callconv(.c) void {
+        const cmux_ws = @import("../../../cmux/workspace/manager.zig");
+        const mgr = cmux_ws.getGlobal() orelse return;
+        const ws_id = mgr.create("workspace", null) catch return;
+
+        // Select the new workspace
+        mgr.mutex.lock();
+        mgr.active_id = ws_id;
+        mgr.mutex.unlock();
+
+        // Create a new tab for it
+        const gtk_win = cmux_window_ref orelse return;
+        const window = gobject.ext.cast(Window, gtk_win) orelse return;
+        window.newTab(null);
+
+        // Force sidebar refresh
+        cmux_sidebar_last_hash = 0;
     }
 
-    /// Notifications tab toggled — show notifications page.
-    fn cmuxNotifTabToggled(_: *gtk.ToggleButton, stack: *gtk.Stack) callconv(.c) void {
-        stack.setVisibleChildName("notifications");
-    }
-
-    /// Workspace row selected — switch active workspace.
+    /// Workspace row selected — switch active workspace AND switch to its tab.
     fn cmuxWorkspaceRowSelected(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, _: *gtk.ListBox) callconv(.c) void {
         const selected_row = row orelse return;
         const index = selected_row.getIndex();
@@ -946,12 +827,29 @@ pub const Window = extern struct {
 
         const cmux_ws = @import("../../../cmux/workspace/manager.zig");
         const mgr = cmux_ws.getGlobal() orelse return;
-        mgr.mutex.lock();
-        defer mgr.mutex.unlock();
 
+        mgr.mutex.lock();
         const idx: usize = @intCast(index);
-        if (idx < mgr.workspaces.items.len) {
-            mgr.active_id = mgr.workspaces.items[idx].id;
+        if (idx >= mgr.workspaces.items.len) {
+            mgr.mutex.unlock();
+            return;
+        }
+        mgr.active_id = mgr.workspaces.items[idx].id;
+        mgr.mutex.unlock();
+
+        // Switch to the corresponding tab in the TabView
+        const gtk_win = cmux_window_ref orelse return;
+        const window = gobject.ext.cast(Window, gtk_win) orelse return;
+        const tab_view = window.getTabView();
+        const n_pages = tab_view.getNPages();
+
+        // If the workspace index maps to a tab, select it
+        if (index < n_pages) {
+            const page = tab_view.getNthPage(index);
+            tab_view.setSelectedPage(page);
+        } else {
+            // Workspace has no tab yet — create one
+            window.newTab(null);
         }
     }
 
