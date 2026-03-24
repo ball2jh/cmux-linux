@@ -44,6 +44,9 @@ pie: bool = false,
 strip: bool = false,
 patch_rpath: ?[]const u8 = null,
 
+/// cmux variant
+cmux: bool = false,
+
 /// Artifacts
 flatpak: bool = false,
 snap: bool = false,
@@ -176,6 +179,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         bool,
         "snap",
         "Build for Snap (do specific Snap operations). Only has an effect targeting Linux.",
+    ) orelse false;
+
+    config.cmux = b.option(
+        bool,
+        "cmux",
+        "Build the cmux variant with cmux identity (binary name, app ID, resources).",
     ) orelse false;
 
     config.sentry = b.option(
@@ -502,6 +511,7 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
 pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // We need to break these down individual because addOption doesn't
     // support all types.
+    step.addOption(bool, "cmux", self.cmux);
     step.addOption(bool, "flatpak", self.flatpak);
     step.addOption(bool, "snap", self.snap);
     step.addOption(bool, "x11", self.x11);

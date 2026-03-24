@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const adw = @import("adw");
+const gdk = @import("gdk");
 const gio = @import("gio");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
@@ -17,6 +18,7 @@ const Window = @import("window.zig").Window;
 const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
 const Config = @import("config.zig").Config;
+const search_mod = @import("../../../cmux/command_palette_search.zig");
 
 const log = std.log.scoped(.gtk_ghostty_command_palette);
 
@@ -63,6 +65,25 @@ pub const CommandPalette = extern struct {
         };
     };
 
+    /// The palette scope: commands (">") or switcher (no prefix).
+    pub const Scope = search_mod.PaletteScope;
+
+    /// The current mode of the palette.
+    pub const Mode = enum {
+        /// Showing command results (with ">" prefix).
+        commands,
+        /// Showing switcher results (no prefix).
+        switcher,
+        /// Text input for renaming a tab or workspace.
+        rename_input,
+    };
+
+    /// Target of a rename operation.
+    pub const RenameTarget = struct {
+        kind: enum { workspace, tab },
+        current_name: [:0]const u8,
+    };
+
     const Private = struct {
         /// The configuration that this command palette is using.
         config: ?*Config = null,
@@ -79,9 +100,22 @@ pub const CommandPalette = extern struct {
         /// The model that provides filtered data for the view to display.
         model: *gtk.SingleSelection,
 
-        /// The list that serves as the data source of the model.
-        /// This is where all command data is ultimately stored.
+        /// The list that serves as the visible data source of the model.
+        /// Populated by fuzzy search from the corpus.
         source: *gio.ListStore,
+
+        /// The current scope of the palette (commands vs switcher).
+        scope: Scope = .commands,
+
+        /// The current mode of the palette.
+        mode: Mode = .commands,
+
+        /// The rename target when in rename_input mode.
+        rename_target: ?RenameTarget = null,
+
+        /// Full corpus of all commands (regular + jump), holding strong refs.
+        /// The source ListStore is populated from this via fuzzy search.
+        corpus: std.ArrayList(*Command) = .{},
 
         pub var offset: c_int = 0;
     };
@@ -115,12 +149,39 @@ pub const CommandPalette = extern struct {
                 .detail = "config",
             },
         );
+
+        // Listen for search text changes to detect scope transitions.
+        _ = gtk.SearchEntry.signals.search_changed.connect(
+            self.private().search,
+            *CommandPalette,
+            searchChanged,
+            self,
+            .{},
+        );
+
+        // Add key event controller for custom navigation (Ctrl+N/J/P/K).
+        const key_controller = gtk.EventControllerKey.new();
+        key_controller.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerKey.signals.key_pressed.connect(
+            key_controller,
+            *CommandPalette,
+            keyPressed,
+            self,
+            .{},
+        );
+        self.private().search.as(gtk.Widget).addController(key_controller.as(gtk.EventController));
     }
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        const alloc = Application.default().allocator();
 
         priv.source.removeAll();
+
+        // Release corpus refs.
+        for (priv.corpus.items) |cmd| cmd.unref();
+        priv.corpus.deinit(alloc);
+        priv.corpus = .{};
 
         if (priv.config) |config| {
             config.unref();
@@ -149,33 +210,20 @@ pub const CommandPalette = extern struct {
             return;
         };
 
-        // Clear existing binds
-        priv.source.removeAll();
-
         const alloc = Application.default().allocator();
-        var commands: std.ArrayList(*Command) = .{};
-        defer {
-            for (commands.items) |cmd| cmd.unref();
-            commands.deinit(alloc);
-        }
 
-        self.collectJumpCommands(config, &commands) catch |err| {
+        // Clear old corpus (release refs).
+        for (priv.corpus.items) |cmd| cmd.unref();
+        priv.corpus.clearRetainingCapacity();
+
+        self.collectJumpCommands(config, &priv.corpus) catch |err| {
             log.warn("failed to collect jump commands: {}", .{err});
         };
 
-        self.collectRegularCommands(config, &commands, alloc);
+        self.collectRegularCommands(config, &priv.corpus, alloc);
 
-        // Sort commands
-        std.mem.sort(*Command, commands.items, {}, struct {
-            fn lessThan(_: void, a: *Command, b: *Command) bool {
-                return compareCommands(a, b);
-            }
-        }.lessThan);
-
-        for (commands.items) |cmd| {
-            const cmd_ref = cmd.as(gobject.Object);
-            priv.source.append(cmd_ref);
-        }
+        // Re-run search with current query to repopulate visible results.
+        self.refreshSearchResults();
     }
 
     /// Collect regular commands from configuration, filtering out unsupported actions.
@@ -281,6 +329,158 @@ pub const CommandPalette = extern struct {
         return a_sort_key < b_sort_key;
     }
 
+    /// Handle key presses for custom navigation (Ctrl+N/J down, Ctrl+P/K up).
+    /// Returns 1 (TRUE) if the key was handled, 0 (FALSE) to propagate.
+    fn keyPressed(
+        _: *gtk.EventControllerKey,
+        keyval: c_uint,
+        _: c_uint,
+        gtk_mods: gdk.ModifierType,
+        self: *CommandPalette,
+    ) callconv(.c) c_int {
+        const priv = self.private();
+        const has_ctrl = gtk_mods.control_mask;
+        const no_other_mods = !gtk_mods.shift_mask and !gtk_mods.alt_mask and !gtk_mods.super_mask;
+
+        if (has_ctrl and no_other_mods) {
+            const delta: ?i64 = switch (keyval) {
+                gdk.KEY_n, gdk.KEY_j => 1, // Down
+                gdk.KEY_p, gdk.KEY_k => -1, // Up
+                else => null,
+            };
+
+            if (delta) |d| {
+                const n_items = priv.model.as(gio.ListModel).getNItems();
+                if (n_items == 0) return 1;
+                const current: i64 = @intCast(priv.model.getSelected());
+                const new_idx = std.math.clamp(current + d, 0, @as(i64, @intCast(n_items)) - 1);
+                priv.model.setSelected(@intCast(new_idx));
+                return 1;
+            }
+        }
+
+        // Page Up / Page Down (no modifier needed).
+        if (no_other_mods and !has_ctrl) {
+            const page_delta: ?i64 = switch (keyval) {
+                gdk.KEY_Page_Up => -10,
+                gdk.KEY_Page_Down => 10,
+                else => null,
+            };
+
+            if (page_delta) |d| {
+                const n_items = priv.model.as(gio.ListModel).getNItems();
+                if (n_items == 0) return 1;
+                const current: i64 = @intCast(priv.model.getSelected());
+                const new_idx = std.math.clamp(current + d, 0, @as(i64, @intCast(n_items)) - 1);
+                priv.model.setSelected(@intCast(new_idx));
+                return 1;
+            }
+        }
+
+        // Backspace in rename mode on empty input: go back to commands.
+        if (priv.mode == .rename_input and keyval == gdk.KEY_BackSpace) {
+            const rename_text = priv.search.as(gtk.Editable).getText();
+            const rename_query: []const u8 = std.mem.sliceTo(rename_text, 0);
+            const has_modifier = has_ctrl or gtk_mods.alt_mask or gtk_mods.super_mask;
+            if (search_mod.commandPaletteShouldPopRenameInputOnDelete(rename_query, has_modifier)) {
+                self.exitRenameMode();
+                return 1;
+            }
+        }
+
+        return 0; // Not handled, propagate.
+    }
+
+    /// Handle search text changes — runs fuzzy search and repopulates results.
+    fn searchChanged(_: *gtk.SearchEntry, self: *CommandPalette) callconv(.c) void {
+        const priv = self.private();
+
+        // Don't run fuzzy search while in rename mode.
+        if (priv.mode == .rename_input) return;
+
+        const text = priv.search.as(gtk.Editable).getText();
+        const query: []const u8 = std.mem.sliceTo(text, 0);
+        const new_scope = search_mod.scopeFromQuery(query);
+        priv.scope = new_scope;
+
+        self.refreshSearchResults();
+    }
+
+    /// Get the current scope of the palette.
+    pub fn getScope(self: *CommandPalette) Scope {
+        return self.private().scope;
+    }
+
+    /// Rebuild the visible results from the corpus using fuzzy search.
+    fn refreshSearchResults(self: *CommandPalette) void {
+        const priv = self.private();
+        const alloc = Application.default().allocator();
+
+        // Get the current query, stripping the ">" prefix if present.
+        const text = priv.search.as(gtk.Editable).getText();
+        const raw_query: []const u8 = std.mem.sliceTo(text, 0);
+        const matching_query = search_mod.matchingQueryFromRaw(raw_query);
+
+        // Build corpus entries for SearchEngine. We allocate separate
+        // searchable_texts arrays so they survive into the search call.
+        const corpus = priv.corpus.items;
+        const entries = alloc.alloc(search_mod.SearchCorpusEntry, corpus.len) catch {
+            log.warn("failed to allocate search corpus entries", .{});
+            return;
+        };
+        defer alloc.free(entries);
+
+        // Allocate searchable text slices for each entry (max 2 texts each).
+        const texts_backing = alloc.alloc([2][]const u8, corpus.len) catch {
+            log.warn("failed to allocate searchable texts", .{});
+            return;
+        };
+        defer alloc.free(texts_backing);
+
+        for (corpus, 0..) |cmd, i| {
+            const title_str: []const u8 = if (cmd.propGetTitle()) |t| @as([]const u8, t) else "";
+            const action_key_str: []const u8 = if (cmd.propGetActionKey()) |k| @as([]const u8, k) else "";
+            const cmd_id: []const u8 = if (cmd.propGetCommandId()) |id| @as([]const u8, id) else "";
+
+            texts_backing[i] = .{ title_str, action_key_str };
+            const text_count: usize = if (action_key_str.len > 0) 2 else 1;
+
+            entries[i] = .{
+                .payload = cmd_id,
+                .rank = i,
+                .title = title_str,
+                .searchable_texts = texts_backing[i][0..text_count],
+            };
+        }
+
+        // Run the search engine.
+        const results = search_mod.SearchEngine.search(
+            alloc,
+            entries,
+            matching_query,
+            null, // No history boost yet (Step 7).
+            null, // No cancellation.
+        ) catch {
+            log.warn("search engine failed", .{});
+            return;
+        };
+        defer search_mod.SearchEngine.freeResults(alloc, results);
+
+        // Clear current visible results and repopulate with search results.
+        priv.source.removeAll();
+
+        for (results) |result| {
+            // Find the Command object in the corpus by matching payload (command_id).
+            for (corpus) |cmd| {
+                const cmd_id: []const u8 = if (cmd.propGetCommandId()) |id| @as([]const u8, id) else "";
+                if (std.mem.eql(u8, cmd_id, result.payload)) {
+                    priv.source.append(cmd.as(gobject.Object));
+                    break;
+                }
+            }
+        }
+    }
+
     fn close(self: *CommandPalette) void {
         const priv = self.private();
         _ = priv.dialog.close();
@@ -291,13 +491,24 @@ pub const CommandPalette = extern struct {
     }
 
     fn searchStopped(_: *gtk.SearchEntry, self: *CommandPalette) callconv(.c) void {
+        const priv = self.private();
+        if (priv.mode == .rename_input) {
+            // ESC in rename mode: go back to commands.
+            self.exitRenameMode();
+            return;
+        }
         // ESC was pressed - close the palette
         self.close();
     }
 
     fn searchActivated(_: *gtk.SearchEntry, self: *CommandPalette) callconv(.c) void {
-        // If Enter is pressed, activate the selected entry
         const priv = self.private();
+        if (priv.mode == .rename_input) {
+            // Enter in rename mode: apply the rename.
+            self.applyRename();
+            return;
+        }
+        // If Enter is pressed, activate the selected entry
         self.activated(priv.model.getSelected());
     }
 
@@ -310,12 +521,30 @@ pub const CommandPalette = extern struct {
     /// Show or hide the command palette dialog. If the dialog is shown it will
     /// be modal over the given window.
     pub fn toggle(self: *CommandPalette, window: *Window) void {
+        self.toggleWithScope(window, .commands);
+    }
+
+    /// Show or hide the command palette dialog with a specific scope.
+    pub fn toggleWithScope(self: *CommandPalette, window: *Window, scope: Scope) void {
         const priv = self.private();
 
         // If the dialog has been shown, close it.
         if (priv.dialog.as(gtk.Widget).getRealized() != 0) {
             self.close();
             return;
+        }
+
+        // Set the scope and initial query.
+        priv.scope = scope;
+        switch (scope) {
+            .commands => {
+                priv.search.as(gtk.Editable).setText(">");
+                // Position cursor after ">"
+                priv.search.as(gtk.Editable).setPosition(-1);
+            },
+            .switcher => {
+                priv.search.as(gtk.Editable).setText("");
+            },
         }
 
         // Show the dialog
@@ -334,13 +563,25 @@ pub const CommandPalette = extern struct {
         const object_ = priv.model.as(gio.ListModel).getObject(pos);
         defer if (object_) |object| object.unref();
 
+        const cmd = gobject.ext.cast(Command, object_ orelse return) orelse return;
+
+        // Check if this is a rename command — enter rename mode instead of closing.
+        if (cmd.propGetCommandId()) |cmd_id| {
+            if (std.mem.eql(u8, @as([]const u8, cmd_id), "palette.rename_tab")) {
+                self.enterRenameMode(.{ .kind = .tab, .current_name = "" });
+                return;
+            }
+            if (std.mem.eql(u8, @as([]const u8, cmd_id), "palette.rename_workspace")) {
+                self.enterRenameMode(.{ .kind = .workspace, .current_name = "" });
+                return;
+            }
+        }
+
         // Close before running the action in order to avoid being replaced by
         // another dialog (such as the change title dialog). If that occurs then
         // the command palette dialog won't be counted as having closed properly
         // and cannot receive focus when reopened.
         self.close();
-
-        const cmd = gobject.ext.cast(Command, object_ orelse return) orelse return;
 
         // Handle jump commands differently
         if (cmd.isJump()) {
@@ -361,6 +602,64 @@ pub const CommandPalette = extern struct {
             .{&action},
             null,
         );
+    }
+
+    /// Enter rename mode with the given target.
+    pub fn enterRenameMode(self: *CommandPalette, target: RenameTarget) void {
+        const priv = self.private();
+        priv.mode = .rename_input;
+        priv.rename_target = target;
+
+        // Clear the list and repurpose the search entry for rename input.
+        priv.source.removeAll();
+
+        // Set the search entry text to the current name.
+        priv.search.as(gtk.Editable).setText(target.current_name);
+        priv.search.as(gtk.Editable).setPosition(-1);
+
+        // Update placeholder based on rename kind.
+        switch (target.kind) {
+            .tab => priv.search.setPlaceholderText("Rename tab…"),
+            .workspace => priv.search.setPlaceholderText("Rename workspace…"),
+        }
+
+        _ = priv.search.as(gtk.Widget).grabFocus();
+    }
+
+    /// Exit rename mode back to command list.
+    fn exitRenameMode(self: *CommandPalette) void {
+        const priv = self.private();
+        priv.mode = .commands;
+        priv.rename_target = null;
+
+        // Restore the search entry to command palette mode.
+        priv.search.setPlaceholderText("Execute a command…");
+        priv.search.as(gtk.Editable).setText(">");
+        priv.search.as(gtk.Editable).setPosition(-1);
+
+        // Re-run search to repopulate results.
+        self.refreshSearchResults();
+    }
+
+    /// Apply the rename and close the palette.
+    fn applyRename(self: *CommandPalette) void {
+        const priv = self.private();
+        const target = priv.rename_target orelse return;
+        _ = target;
+
+        // Get the new name from the search entry.
+        const text = priv.search.as(gtk.Editable).getText();
+        const new_name: []const u8 = std.mem.sliceTo(text, 0);
+        _ = new_name;
+
+        // TODO: Apply the rename via workspace manager.
+        // For now, just close the palette. The actual rename application
+        // requires wiring to the workspace manager which will be done
+        // when the debug API bridge is implemented.
+
+        priv.mode = .commands;
+        priv.rename_target = null;
+        self.close();
     }
 
     const C = Common(Self, Private);
@@ -527,12 +826,33 @@ const Command = extern struct {
                 },
             );
         };
+
+        pub const command_id = struct {
+            pub const name = "command-id";
+            const impl = gobject.ext.defineProperty(
+                name,
+                Self,
+                ?[:0]const u8,
+                .{
+                    .default = null,
+                    .accessor = gobject.ext.typedAccessor(
+                        Self,
+                        ?[:0]const u8,
+                        .{
+                            .getter = propGetCommandId,
+                            .getter_transfer = .none,
+                        },
+                    ),
+                },
+            );
+        };
     };
 
     pub const Private = struct {
         config: ?*Config = null,
         arena: ArenaAllocator,
         data: CommandData,
+        command_id: ?[:0]const u8 = null,
 
         pub var offset: c_int = 0;
 
@@ -562,13 +882,22 @@ const Command = extern struct {
         errdefer self.unref();
 
         const priv = self.private();
-        const cloned = try command.clone(priv.arena.allocator());
+        const alloc = priv.arena.allocator();
+        const cloned = try command.clone(alloc);
 
         priv.data = .{
             .regular = .{
                 .command = cloned,
             },
         };
+
+        // Generate command_id from the action (e.g., "palette.new_tab").
+        priv.command_id = std.fmt.allocPrintSentinel(
+            alloc,
+            "palette.{f}",
+            .{command.action},
+            0,
+        ) catch null;
 
         return self;
     }
@@ -580,13 +909,22 @@ const Command = extern struct {
         });
 
         const priv = self.private();
+        const sort_key = @intFromPtr(surface);
         priv.data = .{
             .jump = .{
                 // TODO: Replace with surface id whenever Ghostty adds one
-                .sort_key = @intFromPtr(surface),
+                .sort_key = sort_key,
             },
         };
         priv.data.jump.surface.set(surface);
+
+        // Generate command_id for jump commands.
+        priv.command_id = std.fmt.allocPrintSentinel(
+            priv.arena.allocator(),
+            "switcher.surface.{x}",
+            .{sort_key},
+            0,
+        ) catch null;
 
         return self;
     }
@@ -731,6 +1069,10 @@ const Command = extern struct {
         }
     }
 
+    fn propGetCommandId(self: *Self) ?[:0]const u8 {
+        return self.private().command_id;
+    }
+
     //---------------------------------------------------------------
 
     /// Return a copy of the action. Callers must ensure that they do not use
@@ -780,6 +1122,7 @@ const Command = extern struct {
                 properties.action.impl,
                 properties.title.impl,
                 properties.description.impl,
+                properties.command_id.impl,
             });
 
             gobject.Object.virtual_methods.dispose.implement(class, &dispose);

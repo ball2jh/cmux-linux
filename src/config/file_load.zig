@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
+const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 
 const log = std.log.scoped(.config);
@@ -11,7 +12,7 @@ const log = std.log.scoped(.config);
 pub fn defaultXdgPath(alloc: Allocator) ![]const u8 {
     return try internal_os.xdg.config(
         alloc,
-        .{ .subdir = "ghostty/config.ghostty" },
+        .{ .subdir = build_config.resource_dir_name ++ "/config.ghostty" },
     );
 }
 
@@ -20,7 +21,7 @@ pub fn defaultXdgPath(alloc: Allocator) ![]const u8 {
 pub fn legacyDefaultXdgPath(alloc: Allocator) ![]const u8 {
     return try internal_os.xdg.config(
         alloc,
-        .{ .subdir = "ghostty/config" },
+        .{ .subdir = build_config.resource_dir_name ++ "/config" },
     );
 }
 

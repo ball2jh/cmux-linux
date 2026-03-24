@@ -33,24 +33,8 @@ Adw.Dialog dialog {
         activate => $row_activated();
 
         model: Gtk.SingleSelection model {
-          model: Gtk.FilterListModel {
-            incremental: true;
-
-            filter: Gtk.AnyFilter {
-              Gtk.StringFilter {
-                expression: expr item as <$GhosttyCommand>.title;
-                search: bind search.text;
-              }
-
-              Gtk.StringFilter {
-                expression: expr item as <$GhosttyCommand>.action-key;
-                search: bind search.text;
-              }
-            };
-
-            model: Gio.ListStore source {
-              item-type: typeof<$GhosttyCommand>;
-            };
+          model: Gio.ListStore source {
+            item-type: typeof<$GhosttyCommand>;
           };
         };
 

@@ -24,6 +24,11 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         }),
     });
     build_data_exe.linkLibC();
+    {
+        const build_data_options = b.addOptions();
+        build_data_options.addOption(bool, "cmux", cfg.cmux);
+        build_data_exe.root_module.addOptions("build_options", build_data_options);
+    }
 
     deps.help_strings.addImport(build_data_exe);
 
@@ -119,7 +124,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const install_step = b.addInstallDirectory(.{
             .source_dir = b.path("src/shell-integration"),
             .install_dir = .{ .custom = "share" },
-            .install_subdir = b.pathJoin(&.{ "ghostty", "shell-integration" }),
+            .install_subdir = b.pathJoin(&.{ if (cfg.cmux) "cmux" else "ghostty", "shell-integration" }),
             .exclude_extensions = &.{".md"},
         });
         try steps.append(b.allocator, &install_step.step);
@@ -131,7 +136,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             const install_step = b.addInstallDirectory(.{
                 .source_dir = upstream.path(""),
                 .install_dir = .{ .custom = "share" },
-                .install_subdir = b.pathJoin(&.{ "ghostty", "themes" }),
+                .install_subdir = b.pathJoin(&.{ if (cfg.cmux) "cmux" else "ghostty", "themes" }),
                 .exclude_extensions = &.{".md"},
             });
             try steps.append(b.allocator, &install_step.step);
@@ -143,7 +148,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+fish");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(), "ghostty.fish");
+        _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "cmux.fish" else "ghostty.fish");
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -158,7 +163,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+zsh");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(), "_ghostty");
+        _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "_cmux" else "_ghostty");
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -173,7 +178,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+bash");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(), "ghostty.bash");
+        _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "cmux.bash" else "ghostty.bash");
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -190,22 +195,22 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         {
             const run = b.addRunArtifact(build_data_exe);
             run.addArg("+vim-syntax");
-            _ = wf.addCopyFile(run.captureStdOut(), "syntax/ghostty.vim");
+            _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "syntax/cmux.vim" else "syntax/ghostty.vim");
         }
         {
             const run = b.addRunArtifact(build_data_exe);
             run.addArg("+vim-ftdetect");
-            _ = wf.addCopyFile(run.captureStdOut(), "ftdetect/ghostty.vim");
+            _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "ftdetect/cmux.vim" else "ftdetect/ghostty.vim");
         }
         {
             const run = b.addRunArtifact(build_data_exe);
             run.addArg("+vim-ftplugin");
-            _ = wf.addCopyFile(run.captureStdOut(), "ftplugin/ghostty.vim");
+            _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "ftplugin/cmux.vim" else "ftplugin/ghostty.vim");
         }
         {
             const run = b.addRunArtifact(build_data_exe);
             run.addArg("+vim-compiler");
-            _ = wf.addCopyFile(run.captureStdOut(), "compiler/ghostty.vim");
+            _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "compiler/cmux.vim" else "compiler/ghostty.vim");
         }
 
         const vim_step = b.addInstallDirectory(.{
@@ -233,7 +238,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         const run = b.addRunArtifact(build_data_exe);
         run.addArg("+sublime");
         const wf = b.addWriteFiles();
-        _ = wf.addCopyFile(run.captureStdOut(), "ghostty.sublime-syntax");
+        _ = wf.addCopyFile(run.captureStdOut(), if (cfg.cmux) "cmux.sublime-syntax" else "ghostty.sublime-syntax");
 
         const install_step = b.addInstallDirectory(.{
             .source_dir = wf.getDirectory(),
@@ -265,14 +270,20 @@ fn addLinuxAppResources(
     // Background:
     // https://developer.gnome.org/documentation/guidelines/maintainer/integrating.html
 
-    const name = b.fmt("Ghostty{s}", .{
+    const base_name: []const u8 = if (cfg.cmux) "cmux" else "Ghostty";
+    const base_app_id: []const u8 = if (cfg.cmux) "com.cmuxterm.app" else "com.mitchellh.ghostty";
+    const bin_name: []const u8 = if (cfg.cmux) "cmux" else "ghostty";
+
+    const name = b.fmt("{s}{s}", .{
+        base_name,
         switch (cfg.optimize) {
             .Debug, .ReleaseSafe => " (Debug)",
             .ReleaseFast, .ReleaseSmall => "",
         },
     });
 
-    const app_id = b.fmt("com.mitchellh.ghostty{s}", .{
+    const app_id = b.fmt("{s}{s}", .{
+        base_app_id,
         switch (cfg.optimize) {
             .Debug, .ReleaseSafe => "-debug",
             .ReleaseFast, .ReleaseSmall => "",
@@ -280,8 +291,8 @@ fn addLinuxAppResources(
     });
 
     const exe_abs_path = b.fmt(
-        "{s}/bin/ghostty",
-        .{b.install_prefix},
+        "{s}/bin/{s}",
+        .{ b.install_prefix, bin_name },
     );
 
     // The templates that we will process. The templates are in
@@ -342,6 +353,12 @@ fn addLinuxAppResources(
             b.fmt("share/metainfo/{s}.metainfo.xml", .{app_id}),
         });
 
+        // Right click menu action for Plasma desktop
+        try ts.append(b.allocator, .{
+            b.path("dist/linux/ghostty_dolphin.desktop.in"),
+            b.fmt("share/kio/servicemenus/{s}.desktop", .{base_app_id}),
+        });
+
         break :templates try ts.toOwnedSlice(b.allocator);
     };
 
@@ -352,7 +369,22 @@ fn addLinuxAppResources(
         }, .{
             .NAME = name,
             .APPID = app_id,
+            .ICON = base_app_id,
             .GHOSTTY = exe_abs_path,
+            .GHOSTTY_BIN = bin_name,
+            .HOMEPAGE = if (cfg.cmux) "https://cmux.dev" else "https://ghostty.org",
+            .BUGTRACKER = if (cfg.cmux) "https://github.com/cmux/cmux/issues" else "https://github.com/ghostty-org/ghostty/discussions",
+            .VCS = if (cfg.cmux) "https://github.com/cmux/cmux" else "https://github.com/ghostty-org/ghostty",
+            .SUMMARY = if (cfg.cmux)
+                "cmux is a fast, feature-rich, and cross-platform terminal emulator"
+            else
+                "Ghostty is a fast, feature-rich, and cross-platform terminal emulator",
+            .DEVELOPER_ID = if (cfg.cmux) "dev.cmux" else "com.mitchellh",
+            .DEVELOPER_NAME = if (cfg.cmux) "cmux Developers" else "Mitchell Hashimoto",
+            .DESCRIPTION = if (cfg.cmux)
+                "cmux is a terminal emulator that differentiates itself by being fast, feature-rich, and native. While there are many excellent terminal emulators available, they all force you to choose between speed, features, or native UIs. cmux provides all three."
+            else
+                "Ghostty is a terminal emulator that differentiates itself by being fast, feature-rich, and native. While there are many excellent terminal emulators available, they all force you to choose between speed, features, or native UIs. Ghostty provides all three.",
         });
 
         // Template output has a single header line we want to remove.
@@ -368,65 +400,60 @@ fn addLinuxAppResources(
         try steps.append(b.allocator, &copy.step);
     }
 
-    // Right click menu action for Plasma desktop
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("dist/linux/ghostty_dolphin.desktop"),
-        "share/kio/servicemenus/com.mitchellh.ghostty.desktop",
-    ).step);
-
-    // Right click menu action for Nautilus. Note that this _must_ be named
-    // `ghostty.py`. Using the full app id causes problems (see #5468).
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("dist/linux/ghostty_nautilus.py"),
-        "share/nautilus-python/extensions/ghostty.py",
-    ).step);
+    // Right click menu action for Nautilus. Processed with sed instead of
+    // cmake config headers because Python # comments confuse the cmake parser.
+    {
+        const sed = b.addSystemCommand(&.{
+            "sed",
+            "-e", b.fmt("s|@APPID@|{s}|g", .{app_id}),
+            "-e", b.fmt("s|@GHOSTTY_BIN@|{s}|g", .{bin_name}),
+            "-e", b.fmt("s|@NAME@|{s}|g", .{name}),
+            "-e", b.fmt("s|@ICON@|{s}|g", .{base_app_id}),
+        });
+        sed.addFileArg(b.path("dist/linux/ghostty_nautilus.py.in"));
+        const nautilus_install = b.addInstallFile(
+            sed.captureStdOut(),
+            b.fmt("share/nautilus-python/extensions/{s}.py", .{bin_name}),
+        );
+        try steps.append(b.allocator, &nautilus_install.step);
+    }
 
     // Various icons that our application can use, including the icon
     // that will be used for the desktop.
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/16.png"),
-        "share/icons/hicolor/16x16/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/32.png"),
-        "share/icons/hicolor/32x32/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/128.png"),
-        "share/icons/hicolor/128x128/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/256.png"),
-        "share/icons/hicolor/256x256/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/512.png"),
-        "share/icons/hicolor/512x512/apps/com.mitchellh.ghostty.png",
-    ).step);
+    const icon_sizes = .{
+        .{ "16", "images/gnome/16.png" },
+        .{ "32", "images/gnome/32.png" },
+        .{ "128", "images/gnome/128.png" },
+        .{ "256", "images/gnome/256.png" },
+        .{ "512", "images/gnome/512.png" },
+    };
+    inline for (icon_sizes) |entry| {
+        try steps.append(b.allocator, &b.addInstallFile(
+            b.path(entry[1]),
+            b.fmt("share/icons/hicolor/{s}x{s}/apps/{s}.png", .{ entry[0], entry[0], base_app_id }),
+        ).step);
+    }
     // Flatpaks only support icons up to 512x512.
     if (!cfg.flatpak) {
         try steps.append(b.allocator, &b.addInstallFile(
             b.path("images/gnome/1024.png"),
-            "share/icons/hicolor/1024x1024/apps/com.mitchellh.ghostty.png",
+            b.fmt("share/icons/hicolor/1024x1024/apps/{s}.png", .{base_app_id}),
         ).step);
     }
 
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/32.png"),
-        "share/icons/hicolor/16x16@2/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/64.png"),
-        "share/icons/hicolor/32x32@2/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/256.png"),
-        "share/icons/hicolor/128x128@2/apps/com.mitchellh.ghostty.png",
-    ).step);
-    try steps.append(b.allocator, &b.addInstallFile(
-        b.path("images/gnome/512.png"),
-        "share/icons/hicolor/256x256@2/apps/com.mitchellh.ghostty.png",
-    ).step);
+    // HiDPI (2x) icons
+    const hidpi_sizes = .{
+        .{ "16", "images/gnome/32.png" },
+        .{ "32", "images/gnome/64.png" },
+        .{ "128", "images/gnome/256.png" },
+        .{ "256", "images/gnome/512.png" },
+    };
+    inline for (hidpi_sizes) |entry| {
+        try steps.append(b.allocator, &b.addInstallFile(
+            b.path(entry[1]),
+            b.fmt("share/icons/hicolor/{s}x{s}@2/apps/{s}.png", .{ entry[0], entry[0], base_app_id }),
+        ).step);
+    }
 }
 
 pub fn install(self: *const GhosttyResources) void {

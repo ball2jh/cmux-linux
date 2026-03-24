@@ -5,6 +5,8 @@ const Config = @import("../config/Config.zig");
 const Action = @import("../cli.zig").ghostty.Action;
 const help_strings = @import("help_strings");
 
+const cmd = if (@import("build_options").cmux) "cmux" else "ghostty";
+
 /// A fish completions configuration that contains all the available commands
 /// and options.
 pub const completions = comptimeGenerateCompletions();
@@ -36,21 +38,21 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         try writer.writeAll("\"\n");
     }
 
-    try writer.writeAll("complete -c ghostty -f\n");
+    try writer.writeAll("complete -c " ++ cmd ++ " -f\n");
 
-    try writer.writeAll("complete -c ghostty -s e -l help -f\n");
-    try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
+    try writer.writeAll("complete -c " ++ cmd ++ " -s e -l help -f\n");
+    try writer.writeAll("complete -c " ++ cmd ++ " -n \"not __fish_seen_subcommand_from $commands\" -l version -f\n");
 
     for (@typeInfo(Config).@"struct".fields) |field| {
         if (field.name[0] == '_') continue;
 
-        try writer.writeAll("complete -c ghostty -n \"not __fish_seen_subcommand_from $commands\" -l ");
+        try writer.writeAll("complete -c " ++ cmd ++ " -n \"not __fish_seen_subcommand_from $commands\" -l ");
         try writer.writeAll(field.name);
         try writer.writeAll(if (field.type != bool) " -r" else " ");
         if (std.mem.startsWith(u8, field.name, "font-family"))
-            try writer.writeAll(" -f  -a \"(ghostty +list-fonts | grep '^[A-Z]')\"")
+            try writer.writeAll(" -f  -a \"(" ++ cmd ++ " +list-fonts | grep '^[A-Z]')\"")
         else if (std.mem.eql(u8, "theme", field.name))
-            try writer.writeAll(" -f -a \"(ghostty +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
+            try writer.writeAll(" -f -a \"(" ++ cmd ++ " +list-themes | sed -E 's/^(.*) \\(.*\\$/\\1/')\"")
         else if (std.mem.eql(u8, "working-directory", field.name))
             try writer.writeAll(" -f -k -a \"(__fish_complete_directories)\"")
         else {
@@ -93,7 +95,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
     }
 
     {
-        try writer.writeAll("complete -c ghostty -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
+        try writer.writeAll("complete -c " ++ cmd ++ " -n \"string match -q -- '+*' (commandline -pt)\" -f -a \"");
         var count: usize = 0;
         for (@typeInfo(Action).@"enum".fields) |field| {
             if (count > 0) try writer.writeAll(" ");
@@ -111,7 +113,7 @@ fn writeCompletions(writer: *std.Io.Writer) !void {
         const options = @field(Action, field.name).options();
         for (@typeInfo(options).@"struct".fields) |opt| {
             if (opt.name[0] == '_') continue;
-            try writer.writeAll("complete -c ghostty -n \"__fish_seen_subcommand_from +" ++ field.name ++ "\" -l ");
+            try writer.writeAll("complete -c " ++ cmd ++ " -n \"__fish_seen_subcommand_from +" ++ field.name ++ "\" -l ");
             try writer.writeAll(opt.name);
             try writer.writeAll(if (opt.type != bool) " -r" else "");
 

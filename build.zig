@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) !void {
             // build.
             run_cmd.setEnvironmentVariable(
                 "GHOSTTY_RESOURCES_DIR",
-                b.getInstallPath(.prefix, "share/ghostty"),
+                b.getInstallPath(.prefix, if (config.cmux) "share/cmux" else "share/ghostty"),
             );
 
             run_step.dependOn(&run_cmd.step);
@@ -301,7 +301,8 @@ pub fn build(b: *std.Build) !void {
                 .omit_frame_pointer = false,
                 .unwind_tables = .sync,
             }),
-            // Crash on x86_64 without this
+            // Required: self-hosted backend can't comptime-evaluate
+            // @bitCast on exotic int widths (u10) used by uucode tables.
             .use_llvm = true,
         });
         if (config.emit_test_exe) b.installArtifact(test_exe);

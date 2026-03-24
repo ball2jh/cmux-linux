@@ -43,19 +43,35 @@ pub const font_backend: font.Backend = config.font_backend;
 pub const renderer: rendererpkg.Backend = config.renderer;
 pub const i18n: bool = config.i18n;
 
-/// The bundle ID for the app. This is used in many places and is currently
-/// hardcoded here. We could make this configurable in the future if there
-/// is a reason to do so.
-///
-/// On macOS, this must match the App bundle ID. We can get that dynamically
-/// via an API but I don't want to pay the cost of that at runtime.
-///
-/// On GTK, this should match the various folders with resources.
-///
-/// There are many places that don't use this variable so simply swapping
-/// this variable is NOT ENOUGH to change the bundle ID. I just wanted to
-/// avoid it in Zig coe as much as possible.
-pub const bundle_id = "com.mitchellh.ghostty";
+/// Whether this is a cmux variant build.
+pub const cmux: bool = options.cmux;
+
+/// The bundle ID for the app.
+pub const bundle_id: [:0]const u8 = if (options.cmux) "com.cmuxterm.app" else "com.mitchellh.ghostty";
+
+/// Display name for the application.
+pub const app_name: [:0]const u8 = if (options.cmux) "cmux" else "Ghostty";
+
+/// The subdirectory name under share/ for resources.
+pub const resource_dir_name: [:0]const u8 = if (options.cmux) "cmux" else "ghostty";
+
+/// The environment variable used to locate the resources directory.
+/// This stays as GHOSTTY_RESOURCES_DIR even in cmux mode because the
+/// resources (terminfo, shell integration, themes) are Ghostty's terminal
+/// engine resources. The Mac version uses this same convention.
+pub const resources_env_var: [:0]const u8 = "GHOSTTY_RESOURCES_DIR";
+
+/// GTK application ID (includes debug suffix).
+pub const application_id: [:0]const u8 = bundle_id ++ switch (builtin.mode) {
+    .Debug, .ReleaseSafe => "-debug",
+    .ReleaseFast, .ReleaseSmall => "",
+};
+
+/// DBus object path (includes debug suffix).
+pub const object_path: [:0]const u8 = (if (options.cmux) "/com/cmuxterm/app" else "/com/mitchellh/ghostty") ++ switch (builtin.mode) {
+    .Debug, .ReleaseSafe => "_debug",
+    .ReleaseFast, .ReleaseSmall => "",
+};
 
 /// True if we should have "slow" runtime safety checks. The initial motivation
 /// for this was terminal page/pagelist integrity checks. These were VERY

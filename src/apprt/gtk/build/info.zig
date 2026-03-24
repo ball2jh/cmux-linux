@@ -1,6 +1,10 @@
 const builtin = @import("builtin");
 
-/// Base application ID
+/// Base application ID for GResource paths. This intentionally stays as
+/// "com.mitchellh.ghostty" even in cmux builds because it's the internal
+/// GResource namespace compiled into the binary. The external app identity
+/// (DBus, desktop files, icons) uses build_config.bundle_id instead.
+/// See gresource.zig for how these paths are used in the resource XML.
 pub const base_application_id = "com.mitchellh.ghostty";
 
 /// GTK application ID

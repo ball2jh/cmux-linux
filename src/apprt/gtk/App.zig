@@ -10,6 +10,7 @@ const configpkg = @import("../../config.zig");
 const Config = configpkg.Config;
 const CoreApp = @import("../../App.zig");
 
+const build_config = @import("../../build_config.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("Surface.zig");
 const ipcNewWindow = @import("ipc/new_window.zig").newWindow;
@@ -22,10 +23,10 @@ const log = std.log.scoped(.gtk);
 pub const must_draw_from_app_thread = true;
 
 /// GTK application ID
-pub const application_id = @import("build/info.zig").application_id;
+pub const application_id: [:0]const u8 = build_config.application_id;
 
 /// GTK object path
-pub const object_path = @import("build/info.zig").object_path;
+pub const object_path: [:0]const u8 = build_config.object_path;
 
 /// The GObject Application instance
 app: *Application,

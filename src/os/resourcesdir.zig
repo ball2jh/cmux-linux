@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const build_config = @import("../build_config.zig");
 
 pub const ResourcesDir = struct {
     /// Avoid accessing these directly, use the app() and host() methods instead.
@@ -48,7 +49,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     // Note: we ALWAYS want to allocate here because the result is always
     // freed, do not try to use internal_os.getenv or posix getenv.
     if (comptime builtin.mode != .Debug) {
-        if (std.process.getEnvVarOwned(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
+        if (std.process.getEnvVarOwned(alloc, build_config.resources_env_var)) |dir| {
             if (dir.len > 0) return .{ .app_path = dir };
         } else |err| switch (err) {
             error.EnvironmentVariableNotFound => {},
@@ -79,7 +80,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
         if (comptime builtin.target.os.tag.isDarwin()) {
             inline for (sentinels) |sentinel| {
                 if (try maybeDir(&dir_buf, dir, "Contents/Resources", sentinel)) |v| {
-                    return .{ .app_path = try std.fs.path.join(alloc, &.{ v, "ghostty" }) };
+                    return .{ .app_path = try std.fs.path.join(alloc, &.{ v, build_config.resource_dir_name }) };
                 }
             }
         }
@@ -94,7 +95,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
                 if (builtin.target.os.tag == .freebsd) "local/share" else "share",
                 sentinel,
             )) |v| {
-                return .{ .app_path = try std.fs.path.join(alloc, &.{ v, "ghostty" }) };
+                return .{ .app_path = try std.fs.path.join(alloc, &.{ v, build_config.resource_dir_name }) };
             }
         }
     }
@@ -102,7 +103,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     // If terminfo detection failed in debug builds (somehow),
     // fallback and use the provided resources dir.
     if (comptime builtin.mode == .Debug) {
-        if (std.process.getEnvVarOwned(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
+        if (std.process.getEnvVarOwned(alloc, build_config.resources_env_var)) |dir| {
             if (dir.len > 0) return .{ .app_path = dir };
         } else |err| switch (err) {
             error.EnvironmentVariableNotFound => {},

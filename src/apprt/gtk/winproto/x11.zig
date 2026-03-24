@@ -16,6 +16,7 @@ pub const c = @cImport({
     @cInclude("X11/XKBlib.h");
 });
 
+const build_config = @import("../../../build_config.zig");
 const input = @import("../../../input.zig");
 const Config = @import("../../../config.zig").Config;
 const ApprtWindow = @import("../class/window.zig").Window;
@@ -45,9 +46,8 @@ pub const App = struct {
         const x11_program_name: [:0]const u8 = if (config.@"x11-instance-name") |pn|
             pn
         else if (builtin.mode == .Debug)
-            "ghostty-debug"
-        else
-            "ghostty";
+            if (build_config.cmux) "cmux-debug" else "ghostty-debug"
+        else if (build_config.cmux) "cmux" else "ghostty";
 
         // Set the X11 window class property (WM_CLASS) if we are on an X11
         // display.

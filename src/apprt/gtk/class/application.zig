@@ -331,7 +331,7 @@ pub const Application = extern struct {
                 }
             }
 
-            break :app_id build_info.application_id;
+            break :app_id build_config.application_id;
         };
 
         const display: *gdk.Display = gdk.Display.getDefault() orelse {
@@ -1965,7 +1965,7 @@ const Action = struct {
 
         // Set a default title if we don't already have one
         const t = switch (n.title.len) {
-            0 => "Ghostty",
+            0 => build_config.app_name,
             else => n.title,
         };
 
@@ -1973,7 +1973,7 @@ const Action = struct {
         defer notification.unref();
         notification.setBody(n.body);
 
-        const icon = gio.ThemedIcon.new("com.mitchellh.ghostty");
+        const icon = gio.ThemedIcon.new(build_config.bundle_id);
         defer icon.unref();
         notification.setIcon(icon.as(gio.Icon));
         notification.setDefaultActionAndTargetValue(
@@ -2256,6 +2256,12 @@ const Action = struct {
             pub const none: @This() = .{};
         },
     ) !void {
+        if (comptime build_config.cmux) {
+            self.private().requested_window = true;
+            const cmux_gtk = @import("../../../cmux/gtk/main.zig");
+            return cmux_gtk.newCmuxWindow(self, parent, overrides);
+        }
+
         // Note that we've requested a window at least once. This is used
         // to trigger quit on no windows. Note I'm not sure if this is REALLY
         // necessary, but I don't want to risk a bug where on a slow machine

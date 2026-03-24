@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory
+Actions=RunTerminalHere
+
+[Desktop Action RunTerminalHere]
+Name=Open @NAME@ Here
+Icon=@ICON@
+Exec=@GHOSTTY@ +new-window --working-directory=%F

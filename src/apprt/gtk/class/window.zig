@@ -1740,9 +1740,12 @@ pub const Window = extern struct {
         _: ?*glib.Variant,
         self: *Self,
     ) callconv(.c) void {
-        const name = "Ghostty";
-        const icon = "com.mitchellh.ghostty";
-        const website = "https://ghostty.org";
+        const name: [*:0]const u8 = build_config.app_name;
+        const icon: [*:0]const u8 = build_config.bundle_id;
+        const website = if (build_config.cmux) "https://cmux.dev" else "https://ghostty.org";
+        const issue_url = if (build_config.cmux) "https://github.com/cmux/cmux/issues" else "https://github.com/ghostty-org/ghostty/issues";
+        const about_title = if (build_config.cmux) i18n._("About cmux") else i18n._("About Ghostty");
+        const developer_name = if (build_config.cmux) i18n._("cmux Developers") else i18n._("Ghostty Developers");
 
         if (adw_version.supportsDialogs()) {
             adw.showAboutDialog(
@@ -1750,13 +1753,13 @@ pub const Window = extern struct {
                 "application-name",
                 name,
                 "developer-name",
-                i18n._("Ghostty Developers"),
+                developer_name,
                 "application-icon",
                 icon,
                 "version",
                 build_config.version_string.ptr,
                 "issue-url",
-                "https://github.com/ghostty-org/ghostty/issues",
+                issue_url,
                 "website",
                 website,
                 @as(?*anyopaque, null),
@@ -1769,7 +1772,7 @@ pub const Window = extern struct {
                 "logo-icon-name",
                 icon,
                 "title",
-                i18n._("About Ghostty"),
+                about_title,
                 "version",
                 build_config.version_string.ptr,
                 "website",
@@ -1951,10 +1954,13 @@ pub const Window = extern struct {
         }
     }
 
-    /// Toggle the command palette.
-    ///
-    /// TODO: accept the surface that toggled the command palette as a parameter
+    /// Toggle the command palette in commands mode (">").
     fn toggleCommandPalette(self: *Window) void {
+        self.toggleCommandPaletteWithScope(.commands);
+    }
+
+    /// Toggle the command palette in a specific scope.
+    fn toggleCommandPaletteWithScope(self: *Window, scope: CommandPalette.Scope) void {
         const priv = self.private();
 
         // Get a reference to a command palette. First check the weak reference
@@ -1991,9 +1997,8 @@ pub const Window = extern struct {
         };
         defer command_palette.unref();
 
-        // Tell the command palette to toggle itself. If the dialog gets
-        // presented (instead of hidden) it will be modal over our window.
-        command_palette.toggle(self);
+        // Tell the command palette to toggle itself with the given scope.
+        command_palette.toggleWithScope(self, scope);
     }
 
     // React to a signal from a command palette asking an action to be performed.
@@ -2008,8 +2013,6 @@ pub const Window = extern struct {
         _: ?*glib.Variant,
         self: *Window,
     ) callconv(.c) void {
-        // TODO: accept the surface that toggled the command palette as a
-        // parameter
         self.toggleCommandPalette();
     }
 

@@ -1,0 +1,143 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $CmuxWindow: Adw.ApplicationWindow {
+  styles [
+    "cmux-window",
+  ]
+
+  default-width: 1100;
+  default-height: 700;
+  handle-menubar-accel: false;
+
+  // The OverlaySplitView is the root content. The headerbar is placed
+  // inside the content pane (not over the sidebar) to match the Mac
+  // reference where the titlebar overlays content only.
+  content: Adw.OverlaySplitView split_view {
+    show-sidebar: true;
+    min-sidebar-width: 200;
+    max-sidebar-width: 600;
+    sidebar-width-fraction: 0.22;
+
+    sidebar: Gtk.ScrolledWindow {
+      hscrollbar-policy: never;
+
+      Gtk.Box {
+        orientation: vertical;
+
+        Gtk.ListBox sidebar_list {
+          selection-mode: single;
+          row-selected => $on_row_selected();
+          vexpand: true;
+
+          styles [
+            "navigation-sidebar",
+          ]
+        }
+
+        Gtk.Box {
+          orientation: horizontal;
+          halign: start;
+          margin-start: 8;
+          margin-end: 8;
+          margin-top: 4;
+          margin-bottom: 8;
+
+          Gtk.Button add_workspace_btn {
+            icon-name: "list-add-symbolic";
+            tooltip-text: "New Workspace";
+            clicked => $on_add_workspace();
+            can-focus: false;
+            focus-on-click: false;
+
+            styles [
+              "flat",
+            ]
+          }
+        }
+      }
+    };
+
+    content: Adw.ToolbarView toolbar {
+      [top]
+      Adw.HeaderBar headerbar {
+        show-start-title-buttons: false;
+
+        title-widget: Adw.WindowTitle window_title {
+          title: "cmux";
+        };
+
+        [start]
+        Gtk.ToggleButton sidebar_toggle {
+          icon-name: "sidebar-show-symbolic";
+          tooltip-text: "Toggle Sidebar";
+          active: bind split_view.show-sidebar bidirectional;
+          can-focus: false;
+          focus-on-click: false;
+        }
+
+        [end]
+        Gtk.MenuButton {
+          icon-name: "open-menu-symbolic";
+          menu-model: main_menu;
+          tooltip-text: "Main Menu";
+          can-focus: false;
+        }
+      }
+
+      Adw.ToastOverlay toast_overlay {
+        Gtk.Stack workspace_stack {
+          transition-type: crossfade;
+          transition-duration: 150;
+          vhomogeneous: true;
+          hhomogeneous: true;
+        }
+      }
+    };
+  };
+}
+
+menu main_menu {
+  section {
+    item {
+      label: "Copy";
+      action: "win.copy";
+    }
+
+    item {
+      label: "Paste";
+      action: "win.paste";
+    }
+  }
+
+  section {
+    item {
+      label: "Split Right";
+      action: "win.split-right";
+    }
+
+    item {
+      label: "Split Down";
+      action: "win.split-down";
+    }
+  }
+
+  section {
+    item {
+      label: "New Workspace";
+      action: "win.new-workspace";
+    }
+
+    item {
+      label: "Close Workspace";
+      action: "win.close-workspace";
+    }
+  }
+
+  section {
+    item {
+      label: "Close Window";
+      action: "win.close";
+    }
+  }
+}

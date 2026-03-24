@@ -709,6 +709,9 @@ pub const Surface = extern struct {
         overrides: struct {
             command: ?configpkg.Command = null,
             working_directory: ?[:0]const u8 = null,
+            /// Additional environment variables for the subprocess (e.g. session restore).
+            /// Stored as alternating key, value pairs: [key0, val0, key1, val1, ...].
+            additional_env: ?[]const [:0]const u8 = null,
 
             pub const none: @This() = .{};
         } = .none,
@@ -720,6 +723,8 @@ pub const Surface = extern struct {
         command: ?configpkg.Command = null,
         working_directory: ?[:0]const u8 = null,
         title: ?[:0]const u8 = null,
+        /// Additional environment key/value pairs for the subprocess.
+        additional_env: ?[]const [:0]const u8 = null,
 
         pub const none: @This() = .{};
     }) *Self {
@@ -731,6 +736,15 @@ pub const Surface = extern struct {
         priv.overrides = .{
             .command = if (overrides.command) |c| c.clone(alloc) catch null else null,
             .working_directory = if (overrides.working_directory) |wd| alloc.dupeZ(u8, wd) catch null else null,
+            .additional_env = if (overrides.additional_env) |env| blk: {
+                const duped = alloc.alloc([:0]const u8, env.len) catch break :blk null;
+                for (env, 0..) |s, i| duped[i] = alloc.dupeZ(u8, s) catch {
+                    for (duped[0..i]) |d| alloc.free(d);
+                    alloc.free(duped);
+                    break :blk null;
+                };
+                break :blk duped;
+            } else null,
         };
         return self;
     }
@@ -1609,6 +1623,16 @@ pub const Surface = extern struct {
             }
         }
 
+        // Merge additional environment variables (e.g. session scrollback replay).
+        if (self.private().overrides.additional_env) |pairs| {
+            var i: usize = 0;
+            while (i + 1 < pairs.len) : (i += 2) {
+                try env.put(pairs[i], pairs[i + 1]);
+            }
+            // One-shot: clear after first use to prevent stale replay on surface recreation.
+            self.private().overrides.additional_env = null;
+        }
+
         return env;
     }
 
@@ -1725,8 +1749,8 @@ pub const Surface = extern struct {
             return;
         };
 
-        const t = switch (title.len) {
-            0 => "Ghostty",
+        const t: [*:0]const u8 = switch (title.len) {
+            0 => build_config.app_name,
             else => title,
         };
 
@@ -1734,7 +1758,7 @@ pub const Surface = extern struct {
         defer notification.unref();
         notification.setBody(body);
 
-        const icon = gio.ThemedIcon.new("com.mitchellh.ghostty");
+        const icon = gio.ThemedIcon.new(build_config.bundle_id);
         defer icon.unref();
         notification.setIcon(icon.as(gio.Icon));
 

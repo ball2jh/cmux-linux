@@ -5,6 +5,7 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
+const build_config = @import("../../../build_config.zig");
 const configpkg = @import("../../../config.zig");
 const apprt = @import("../../../apprt.zig");
 const CoreSurface = @import("../../../Surface.zig");
@@ -494,7 +495,6 @@ pub const Tab = extern struct {
         // otherwise the overridden title if it exists, otherwise
         // the terminal title if it exists, otherwise a default string.
         const plain = plain: {
-            const default = "Ghostty";
             const config_title: ?[*:0]const u8 = title: {
                 const config = config_ orelse break :title null;
                 break :title config.get().title orelse null;
@@ -504,7 +504,7 @@ pub const Tab = extern struct {
                 surface_override_ orelse
                 terminal_ orelse
                 config_title orelse
-                break :plain default;
+                break :plain @as([:0]const u8, build_config.app_name);
             break :plain std.mem.span(plain);
         };
 
