@@ -1,8 +1,14 @@
 #!/bin/bash
 # Run cmux UI tests in a headless Wayland session.
 #
-# Uses mutter --headless as compositor + at-spi2-registryd for accessibility.
-# Designed for Arch Linux / non-GDM systems (Hyprland, sway, etc).
+# Uses the user's D-Bus session bus (required for AT-SPI) + mutter --headless
+# as compositor. Designed for Arch Linux / non-GDM systems.
+#
+# Prerequisites:
+#   - at-spi2-core, mutter, python-gobject installed
+#   - Accessibility enabled: gsettings set org.gnome.desktop.interface toolkit-accessibility true
+#   - venv: python3 -m venv --system-site-packages tests/ui/.venv
+#           tests/ui/.venv/bin/pip install dogtail pytest pytest-xdist
 #
 # Usage:
 #   ./tests/ui/run_headless.sh                     # run all UI tests
@@ -17,7 +23,7 @@ VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
 if [ ! -f "$VENV_PYTHON" ]; then
     echo "Error: venv not found. Create it:"
     echo "  python3 -m venv --system-site-packages $SCRIPT_DIR/.venv"
-    echo "  $SCRIPT_DIR/.venv/bin/pip install dogtail pytest"
+    echo "  $SCRIPT_DIR/.venv/bin/pip install dogtail pytest pytest-xdist"
     exit 1
 fi
 
@@ -28,26 +34,39 @@ if [ "${CMUX_SKIP_BUILD:-}" != "1" ]; then
     zig build -Dcmux=true -Dversion-string="0.1.0-dev"
 fi
 
-# Ensure accessibility is enabled
-gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
-
-# --- Clean up stale processes from previous test runs ---
-# Only kill our mutter instances, NOT the system's at-spi-bus-launcher.
-pkill -9 -f 'mutter.*headless' 2>/dev/null || true
-sleep 1
-rm -f /run/user/$(id -u)/wayland-*.lock 2>/dev/null || true
-
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export GTK_A11Y=atspi
 
+# Ensure accessibility is enabled
+gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
+
+# --- Clean up stale mutter from previous runs ---
+pkill -9 -f 'mutter.*headless' 2>/dev/null || true
+sleep 0.5
+rm -f "$XDG_RUNTIME_DIR"/wayland-*.lock 2>/dev/null || true
+
+# --- Ensure AT-SPI services are running on the session bus ---
+# at-spi-bus-launcher manages the AT-SPI bus. If it's not running
+# (e.g. killed by a previous test run), restart it.
+if ! pgrep -f at-spi-bus-launcher >/dev/null 2>&1; then
+    echo "Starting AT-SPI bus launcher..."
+    /usr/lib/at-spi-bus-launcher &>/dev/null &
+    sleep 1
+fi
+if ! pgrep -f at-spi2-registryd >/dev/null 2>&1; then
+    echo "Starting AT-SPI registry..."
+    /usr/lib/at-spi2-registryd &>/dev/null &
+    sleep 1
+fi
+
 # --- Start headless Wayland compositor ---
-# AT-SPI uses the system's at-spi-bus-launcher + registryd (do NOT start our own).
 mutter --wayland --no-x11 --headless &>/dev/null &
 MUTTER_PID=$!
 
-# Wait for wayland socket to appear
+# Wait for wayland socket
+WAYLAND_DISPLAY=""
 for i in $(seq 1 20); do
-    SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v lock | head -1)
+    SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v lock | head -1 || true)
     if [ -n "$SOCK" ]; then
         export WAYLAND_DISPLAY=$(basename "$SOCK")
         break
@@ -63,7 +82,7 @@ fi
 
 echo "Headless session ready: WAYLAND_DISPLAY=$WAYLAND_DISPLAY (mutter=$MUTTER_PID)"
 
-# --- Cleanup on exit ---
+# --- Cleanup on exit (only kill mutter, leave AT-SPI alone) ---
 cleanup() {
     kill $MUTTER_PID 2>/dev/null || true
     wait $MUTTER_PID 2>/dev/null || true
@@ -71,13 +90,8 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Run tests ---
-# Use pytest-xdist for parallel execution when available.
-# -n auto = one worker per CPU core. Each test launches its own cmux instance
-# so they don't conflict. Use -n0 or --forked to disable parallelism.
-# Use pytest-xdist for parallel execution when available.
 # --dist loadfile keeps tests from the same file on one worker so they share
-# the session-scoped cmux_app fixture (one cmux instance per file, not per worker).
-# Use -n0 to disable parallelism for debugging.
+# the session-scoped cmux_app fixture. Use -n0 to disable parallelism.
 PARALLEL_FLAG=""
 if "$VENV_PYTHON" -c "import xdist" 2>/dev/null; then
     PARALLEL_FLAG="-n auto --dist loadfile"

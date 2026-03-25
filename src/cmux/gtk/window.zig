@@ -863,6 +863,7 @@ pub const CmuxWindow = extern struct {
         scrolled.as(gtk.Widget).setVexpand(1);
         scrolled.as(gtk.Widget).setHexpand(1);
 
+        priv.toast_overlay.setChild(null); // unparent first
         priv.toast_overlay.setChild(scrolled.as(gtk.Widget));
         priv.shortcuts_overlay = scrolled.as(gtk.Widget);
     }
@@ -906,7 +907,8 @@ pub const CmuxWindow = extern struct {
     fn onShortcutsClose(_: *gtk.Button, self: *Self) callconv(.c) void {
         const priv = self.private();
         if (priv.shortcuts_overlay != null) {
-            priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
+            priv.toast_overlay.setChild(null); // unparent first
+        priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
             priv.shortcuts_overlay = null;
         }
     }
@@ -984,6 +986,7 @@ pub const CmuxWindow = extern struct {
         overlay_box.as(gtk.Widget).setHalign(.fill);
         overlay_box.append(content.as(gtk.Widget));
 
+        priv.toast_overlay.setChild(null); // unparent first
         priv.toast_overlay.setChild(overlay_box.as(gtk.Widget));
         priv.feedback_overlay = overlay_box.as(gtk.Widget);
     }
@@ -999,7 +1002,8 @@ pub const CmuxWindow = extern struct {
     fn dismissFeedbackComposer(self: *Self) void {
         const priv = self.private();
         if (priv.feedback_overlay != null) {
-            priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
+            priv.toast_overlay.setChild(null); // unparent first
+        priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
             priv.feedback_overlay = null;
         }
     }
@@ -1345,13 +1349,13 @@ pub const CmuxWindow = extern struct {
             .executeFn = &onPaletteCommandExecuted,
         });
 
-        // Add the palette as an overlay on the toast_overlay widget
+        // Add the palette as an overlay on the toast_overlay widget.
+        // Unparent toast_overlay from toolbar_view first, then reparent into overlay.
+        const toolbar_view = priv.toast_overlay.as(gtk.Widget).getParent();
+        priv.toast_overlay.as(gtk.Widget).unparent();
         const overlay = gtk.Overlay.new();
         overlay.setChild(priv.toast_overlay.as(gtk.Widget));
         overlay.addOverlay(palette.as(gtk.Widget));
-
-        // Replace the toast_overlay in the toolbar view with our overlay
-        const toolbar_view = priv.toast_overlay.as(gtk.Widget).getParent();
         if (toolbar_view) |tv| {
             if (gobject.ext.cast(adw.ToolbarView, tv)) |tbv| {
                 tbv.setContent(overlay.as(gtk.Widget));

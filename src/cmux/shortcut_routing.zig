@@ -429,6 +429,7 @@ test "ShortcutRouting: command palette switcher default shortcut" {
 test "ShortcutRouting: defaults keys are unique across all actions" {
     const all_actions = comptime std.enums.values(ShortcutAction);
     comptime {
+        @setEvalBranchQuota(5000);
         for (all_actions, 0..) |a, i| {
             for (all_actions[i + 1 ..]) |b| {
                 if (std.mem.eql(u8, a.defaultsKey(), b.defaultsKey())) {

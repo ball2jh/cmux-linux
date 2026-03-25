@@ -619,6 +619,11 @@ fn addGtkNg(
 
     step.linkSystemLibrary2("gtk4", dynamic_link_opts);
     step.linkSystemLibrary2("libadwaita-1", dynamic_link_opts);
+    // NOTE: webkitgtk-6.0 is NOT linked here because it pulls in a dynamic
+    // libxml2 that collides with the static libxml2 from fontconfig, causing
+    // a division-by-zero panic in xmlDictLookup (dict->size == 0 from the
+    // Zig-compiled static copy getting called with dynamic library state).
+    // WebKitGTK will be linked conditionally when browser features are enabled.
 
     if (self.config.x11) {
         step.linkSystemLibrary2("X11", dynamic_link_opts);
