@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const posix = std.posix;
+const json = std.json;
+const build_config = @import("../build_config.zig");
 
 const log = std.log.scoped(.cmux_ui_test);
 
@@ -494,12 +496,14 @@ fn directWriteFile(path: []const u8, data: []const u8) void {
 // ---------------------------------------------------------------------------
 
 fn envBool(name: [*:0]const u8) bool {
-    const val = posix.getenv(name) orelse return false;
+    const raw = std.c.getenv(name) orelse return false;
+    const val: [:0]const u8 = std.mem.span(raw);
     return std.mem.eql(u8, val, "1");
 }
 
-fn envNonEmpty(name: [*:0]const u8) ?[]const u8 {
-    const val = posix.getenv(name) orelse return null;
+fn envNonEmpty(name: [*:0]const u8) ?[:0]const u8 {
+    const raw = std.c.getenv(name) orelse return null;
+    const val: [:0]const u8 = std.mem.span(raw);
     return if (val.len > 0) val else null;
 }
 

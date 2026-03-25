@@ -863,26 +863,14 @@ const SyncToggleSidebarCtx = struct {
     const Action = enum { show, hide, toggle };
 
     fn callback(data: ?*anyopaque) callconv(.c) c_int {
-        const gtk_mod = @import("gtk");
-        const adw_mod = @import("adw");
-        const gobject_mod = @import("gobject");
+        const CmuxWindow = @import("gtk/window.zig").CmuxWindow;
 
         const ctx: *SyncToggleSidebarCtx = @ptrCast(@alignCast(data orelse return 0));
-        const win: *gtk_mod.Widget = @ptrCast(@alignCast(ctx.window));
-        var child = win.getFirstChild();
-        while (child) |c| {
-            if (gobject_mod.ext.cast(adw_mod.OverlaySplitView, c)) |split_view| {
-                switch (ctx.action) {
-                    .show => split_view.setShowSidebar(1),
-                    .hide => split_view.setShowSidebar(0),
-                    .toggle => {
-                        const current = split_view.getShowSidebar();
-                        split_view.setShowSidebar(if (current != 0) 0 else 1);
-                    },
-                }
-                return 0;
-            }
-            child = c.getNextSibling();
+        const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+        switch (ctx.action) {
+            .show => win.toggleSidebar(true),
+            .hide => win.toggleSidebar(false),
+            .toggle => win.toggleSidebar(null),
         }
         return 0;
     }

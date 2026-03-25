@@ -348,3 +348,128 @@ fn shouldStop(self: *SessionController) bool {
     defer self.mutex.unlock();
     return self.is_stopping;
 }
+
+// --- File upload via SCP ---
+
+const image_transfer_mod = @import("../image_transfer.zig");
+
+/// Upload files to the remote host via SCP using this session's configuration.
+/// Blocks the calling thread. Suitable for calling from a background thread.
+pub fn uploadDroppedFiles(
+    self: *SessionController,
+    file_paths: []const []const u8,
+    operation: *image_transfer_mod.Operation,
+) image_transfer_mod.UploadResult {
+    const alloc = self.allocator;
+    var remote_paths = std.ArrayListUnmanaged([]const u8){};
+
+    for (file_paths) |local_path| {
+        if (operation.isCancelled()) {
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "cancelled" };
+        }
+
+        var rpath_buf: [256]u8 = undefined;
+        const ext = image_transfer_mod.pathExtension(local_path);
+        const rpath = image_transfer_mod.remoteDropPath(&rpath_buf, ext) orelse {
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "failed to generate remote path" };
+        };
+
+        const rpath_owned = alloc.dupe(u8, rpath) catch {
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "out of memory" };
+        };
+
+        // Build remote destination: "dest:path".
+        const remote_dest = std.fmt.allocPrint(alloc, "{s}:{s}", .{
+            self.configuration.destination, rpath,
+        }) catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "out of memory" };
+        };
+        defer alloc.free(remote_dest);
+
+        const scp_args = ssh_args.buildScpArgs(
+            alloc, self.configuration, local_path, remote_dest,
+        ) catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "failed to build SCP arguments" };
+        };
+        defer alloc.free(scp_args);
+
+        // Prepend "scp" binary.
+        var argv = std.ArrayListUnmanaged([]const u8){};
+        defer argv.deinit(alloc);
+        argv.append(alloc, "scp") catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "out of memory" };
+        };
+        argv.appendSlice(alloc, scp_args) catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "out of memory" };
+        };
+
+        const result = process_mod.run(alloc, argv.items, 45_000) catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "scp process error" };
+        };
+
+        if (result.exit_code != 0) {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            if (result.stderr.len > 0) {
+                log.err("scp failed: {s}", .{result.stderr});
+            }
+            return .{ .failure = "scp upload failed" };
+        }
+
+        remote_paths.append(alloc, rpath_owned) catch {
+            alloc.free(rpath_owned);
+            cleanupRemotePaths(alloc, self.configuration, remote_paths.items);
+            return .{ .failure = "out of memory" };
+        };
+    }
+
+    return .{ .success = remote_paths.toOwnedSlice(alloc) catch &.{} };
+}
+
+fn cleanupRemotePaths(alloc: Allocator, config: remote.Configuration, paths: []const []const u8) void {
+    if (paths.len == 0) return;
+
+    // Build cleanup command: rm -f -- '/path1' '/path2'
+    var cmd_buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    const prefix = "rm -f --";
+    @memcpy(cmd_buf[pos..][0..prefix.len], prefix);
+    pos += prefix.len;
+
+    for (paths) |rp| {
+        if (pos + 4 + rp.len > cmd_buf.len) break;
+        cmd_buf[pos] = ' ';
+        cmd_buf[pos + 1] = '\'';
+        pos += 2;
+        @memcpy(cmd_buf[pos..][0..rp.len], rp);
+        pos += rp.len;
+        cmd_buf[pos] = '\'';
+        pos += 1;
+    }
+
+    // Build SSH command for cleanup.
+    const common_args = ssh_args.buildCommonArgs(alloc, config, true) catch return;
+    defer alloc.free(common_args);
+
+    var argv = std.ArrayListUnmanaged([]const u8){};
+    defer argv.deinit(alloc);
+    argv.append(alloc, "ssh") catch return;
+    argv.appendSlice(alloc, common_args) catch return;
+    argv.append(alloc, config.destination) catch return;
+    argv.append(alloc, alloc.dupe(u8, cmd_buf[0..pos]) catch return) catch return;
+
+    _ = process_mod.run(alloc, argv.items, 8_000) catch {};
+}

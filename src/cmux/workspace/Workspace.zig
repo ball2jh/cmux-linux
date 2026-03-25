@@ -363,6 +363,56 @@ pub fn panelCount(self: *const Workspace) usize {
     return self.panels.count();
 }
 
+/// Move a panel to a new index in the ordered panel map.
+/// Used by the pane tab bar drag reorder.
+pub fn movePanelToIndex(self: *Workspace, panel_id: Uuid, new_index: usize) void {
+    const keys = self.panels.keys();
+    const current_idx = for (keys, 0..) |k, i| {
+        if (k.eql(panel_id)) break i;
+    } else return;
+
+    if (current_idx == new_index) return;
+    const target = @min(new_index, self.panels.count() -| 1);
+
+    // Extract the entry, reinsert at the target position.
+    // ArrayHashMap doesn't have a direct reorder API, so we
+    // rebuild by removing and reinserting.
+    const panel = self.panels.get(panel_id) orelse return;
+
+    // Collect all entries in order.
+    var buf: [256]struct { id: Uuid, panel: Panel } = undefined;
+    var count: usize = 0;
+    var it = self.panels.iterator();
+    while (it.next()) |entry| {
+        if (count < buf.len) {
+            buf[count] = .{ .id = entry.key_ptr.*, .panel = entry.value_ptr.* };
+            count += 1;
+        }
+    }
+
+    // Clear and rebuild in new order.
+    // Note: we cannot call deinit on the removed panels since we're
+    // reinserting them (ownership transfer).
+    self.panels.clearRetainingCapacity();
+
+    var inserted = false;
+    var src: usize = 0;
+    var dst: usize = 0;
+    while (src < count) : (src += 1) {
+        if (buf[src].id.eql(panel_id)) continue; // skip dragged
+        if (dst == target and !inserted) {
+            self.panels.put(self.allocator, panel_id, panel) catch {};
+            inserted = true;
+            dst += 1;
+        }
+        self.panels.put(self.allocator, buf[src].id, buf[src].panel) catch {};
+        dst += 1;
+    }
+    if (!inserted) {
+        self.panels.put(self.allocator, panel_id, panel) catch {};
+    }
+}
+
 // -----------------------------------------------------------------------
 // Panel metadata
 // -----------------------------------------------------------------------

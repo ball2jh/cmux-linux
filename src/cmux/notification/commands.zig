@@ -30,6 +30,11 @@ pub fn parseNotificationPayload(raw: []const u8) NotificationPayload {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return .{ .title = "Notification", .subtitle = "", .body = "" };
 
+    // Flag-style: --title TITLE --subtitle SUBTITLE --body BODY
+    if (std.mem.startsWith(u8, trimmed, "--")) {
+        return parseFlagPayload(trimmed);
+    }
+
     // Split on '|', max 3 parts.
     var parts: [3][]const u8 = .{ "", "", "" };
     var count: usize = 0;
@@ -67,6 +72,69 @@ pub fn parseNotificationPayload(raw: []const u8) NotificationPayload {
             .body = "",
         };
     }
+}
+
+/// Parse flag-style notification payload: --title TITLE --subtitle SUBTITLE --body BODY
+/// Flags can appear in any order. Values run until the next flag or end-of-string.
+fn parseFlagPayload(input: []const u8) NotificationPayload {
+    var title: []const u8 = "";
+    var subtitle: []const u8 = "";
+    var body: []const u8 = "";
+
+    // Tokenize by splitting on "--" boundaries
+    var rest = input;
+    while (rest.len > 0) {
+        // Skip whitespace
+        rest = std.mem.trimLeft(u8, rest, " \t");
+        if (rest.len == 0) break;
+
+        if (std.mem.startsWith(u8, rest, "--title")) {
+            rest = rest["--title".len..];
+            rest = std.mem.trimLeft(u8, rest, " \t");
+            title = extractValueUntilNextFlag(rest);
+            rest = rest[title.len..];
+            title = std.mem.trim(u8, title, " \t\r\n");
+        } else if (std.mem.startsWith(u8, rest, "--subtitle")) {
+            rest = rest["--subtitle".len..];
+            rest = std.mem.trimLeft(u8, rest, " \t");
+            subtitle = extractValueUntilNextFlag(rest);
+            rest = rest[subtitle.len..];
+            subtitle = std.mem.trim(u8, subtitle, " \t\r\n");
+        } else if (std.mem.startsWith(u8, rest, "--body")) {
+            rest = rest["--body".len..];
+            rest = std.mem.trimLeft(u8, rest, " \t");
+            body = extractValueUntilNextFlag(rest);
+            rest = rest[body.len..];
+            body = std.mem.trim(u8, body, " \t\r\n");
+        } else {
+            // Skip unknown token
+            if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
+                rest = rest[sp + 1 ..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    return .{
+        .title = if (title.len == 0) "Notification" else title,
+        .subtitle = subtitle,
+        .body = body,
+    };
+}
+
+/// Extract text from the current position until the next "--" flag or end of string.
+fn extractValueUntilNextFlag(input: []const u8) []const u8 {
+    // Look for " --" (space followed by double dash) as the boundary.
+    // This allows values to contain arbitrary text.
+    var i: usize = 0;
+    while (i < input.len) {
+        if (i + 2 < input.len and input[i] == ' ' and input[i + 1] == '-' and input[i + 2] == '-') {
+            return input[0..i];
+        }
+        i += 1;
+    }
+    return input;
 }
 
 /// Handle `notify_target <workspace_id> <surface_id> <title>|<subtitle>|<body>`.
@@ -371,4 +439,41 @@ test "handleClearNotifications invalid args" {
     var buf: [4096]u8 = undefined;
     const resp = handleClearNotifications(&store, "invalid", &buf);
     try testing.expect(std.mem.startsWith(u8, resp, "ERROR:"));
+}
+
+// --- Flag-style parsing tests ---
+
+test "parseNotificationPayload flag-style all flags" {
+    const p = parseNotificationPayload("--title Build Complete --subtitle Step 3 --body All tests passed");
+    try testing.expectEqualStrings("Build Complete", p.title);
+    try testing.expectEqualStrings("Step 3", p.subtitle);
+    try testing.expectEqualStrings("All tests passed", p.body);
+}
+
+test "parseNotificationPayload flag-style title only" {
+    const p = parseNotificationPayload("--title Build Complete");
+    try testing.expectEqualStrings("Build Complete", p.title);
+    try testing.expectEqualStrings("", p.subtitle);
+    try testing.expectEqualStrings("", p.body);
+}
+
+test "parseNotificationPayload flag-style title and body" {
+    const p = parseNotificationPayload("--title Build --body All tests passed");
+    try testing.expectEqualStrings("Build", p.title);
+    try testing.expectEqualStrings("", p.subtitle);
+    try testing.expectEqualStrings("All tests passed", p.body);
+}
+
+test "parseNotificationPayload flag-style different order" {
+    const p = parseNotificationPayload("--body Done --title Build --subtitle Step 1");
+    try testing.expectEqualStrings("Build", p.title);
+    try testing.expectEqualStrings("Step 1", p.subtitle);
+    try testing.expectEqualStrings("Done", p.body);
+}
+
+test "parseNotificationPayload flag-style empty title defaults" {
+    const p = parseNotificationPayload("--body Some body");
+    try testing.expectEqualStrings("Notification", p.title);
+    try testing.expectEqualStrings("", p.subtitle);
+    try testing.expectEqualStrings("Some body", p.body);
 }

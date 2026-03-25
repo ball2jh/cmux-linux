@@ -27,7 +27,7 @@ const drop_planner = @import("../sidebar_drop_planner.zig");
 const cmux = @import("../main.zig");
 const bridge = @import("bridge.zig");
 const CommandPalette = @import("command_palette.zig").CommandPalette;
-const command_palette_mod = @import("command_palette.zig");
+const NotificationsPopover = @import("notifications_popover.zig").NotificationsPopover;
 const image_transfer = @import("../image_transfer.zig");
 const SshSessionDetector = @import("../remote/SshSessionDetector.zig");
 
@@ -58,6 +58,12 @@ pub const CmuxWindow = extern struct {
                 },
             );
         };
+    };
+
+    const CloseDialogAction = union(enum) {
+        close_window,
+        close_workspace: cmux.Uuid,
+        close_workspaces: []const cmux.Uuid,
     };
 
     const Private = struct {
@@ -122,6 +128,16 @@ pub const CmuxWindow = extern struct {
 
         // Render diagnostics for UI tests (heap-allocated when enabled).
         render_diag: ?*cmux.render_diagnostics.RenderDiagnostics = null,
+
+        // Browser panel tracking
+        browser_panel_map: std.AutoArrayHashMapUnmanaged(cmux.Uuid, *BrowserPanelView) = .{},
+
+        // Notifications popover
+        notifications_popover: ?*NotificationsPopover = null,
+
+        // Close confirmation dialog state
+        active_close_dialog: ?*adw.AlertDialog = null,
+        active_close_dialog_on_confirm: ?CloseDialogAction = null,
 
         pub var offset: c_int = 0;
     };
@@ -397,6 +413,10 @@ pub const CmuxWindow = extern struct {
         const app = self.as(gtk.Window).getApplication() orelse return;
         const shortcuts_mod = @import("shortcuts.zig");
         shortcuts_mod.syncAccelerators(app);
+        {
+            const accels = [_:null]?[*:0]const u8{"<Ctrl><Alt>f"};
+            app.setAccelsForAction("win.send-feedback", &accels);
+        }
     }
 
     fn actionClose(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
@@ -457,7 +477,269 @@ pub const CmuxWindow = extern struct {
         self.performBindingAction(.{ .copy_to_clipboard = .mixed });
     }
 
+
+    // Image transfer clipboard interception
+    const ImageTransferRequest = struct {
+        window: *Self,
+        surface: *Surface,
+    };
+
+    fn onUriListRead(source: ?*gobject.Object, res: *gio.AsyncResult, ud: ?*anyopaque) callconv(.c) void {
+        const alloc = Application.default().allocator();
+        const req: *ImageTransferRequest = @ptrCast(@alignCast(ud orelse return));
+        defer { req.window.unref(); req.surface.unref(); alloc.destroy(req); }
+
+        const cb = gobject.ext.cast(gdk.Clipboard, source orelse return) orelse return;
+        var gerr: ?*glib.Error = null;
+        const cstr_ = cb.readTextFinish(res, &gerr);
+        if (gerr) |e| { e.free(); req.window.performBindingAction(.paste_from_clipboard); return; }
+        const cstr = cstr_ orelse { req.window.performBindingAction(.paste_from_clipboard); return; };
+        defer glib.free(cstr);
+        const uri_text = std.mem.sliceTo(cstr, 0);
+
+        var file_paths = std.ArrayListUnmanaged([]const u8){};
+        defer { for (file_paths.items) |fp| alloc.free(fp); file_paths.deinit(alloc); }
+
+        var lines = std.mem.splitScalar(u8, uri_text, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimRight(u8, line, "\r \t");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            if (std.mem.startsWith(u8, trimmed, "file://")) {
+                const decoded = uriDecode(alloc, trimmed[7..]) orelse continue;
+                file_paths.append(alloc, decoded) catch continue;
+            }
+        }
+
+        if (file_paths.items.len == 0) {
+            req.window.performBindingAction(.paste_from_clipboard);
+            return;
+        }
+
+        const target = resolveTransferTarget(req.window);
+        const p = image_transfer.plan(alloc, .{ .file_paths = file_paths.items }, target);
+        dispatchPlan(alloc, req.window, req.surface, p);
+    }
+
+    fn onTextureRead(source: ?*gobject.Object, res: *gio.AsyncResult, ud: ?*anyopaque) callconv(.c) void {
+        const alloc = Application.default().allocator();
+        const req: *ImageTransferRequest = @ptrCast(@alignCast(ud orelse return));
+        defer { req.window.unref(); req.surface.unref(); alloc.destroy(req); }
+
+        const cb = gobject.ext.cast(gdk.Clipboard, source orelse return) orelse return;
+        var gerr: ?*glib.Error = null;
+        const tex = cb.readTextureFinish(res, &gerr) orelse {
+            if (gerr) |e| e.free();
+            req.window.performBindingAction(.paste_from_clipboard);
+            return;
+        };
+        defer tex.as(gobject.Object).unref();
+
+        const bytes: *glib.Bytes = tex.saveToPngBytes();
+        defer bytes.unref();
+        const size = bytes.getSize();
+        if (size == 0) return;
+        const data_ptr = bytes.getData(null) orelse return;
+
+        const path = image_transfer.saveImageToTempFile(alloc, data_ptr[0..size], "png") orelse {
+            req.window.performBindingAction(.paste_from_clipboard);
+            return;
+        };
+
+        const paths = &[_][]const u8{path};
+        const target = resolveTransferTarget(req.window);
+        const p = image_transfer.plan(alloc, .{ .file_paths = paths }, target);
+        dispatchPlan(alloc, req.window, req.surface, p);
+    }
+
+    fn dispatchPlan(alloc: Allocator, window: *Self, surface: *Surface, p: image_transfer.Plan) void {
+        switch (p) {
+            .insert_text => |text| { pasteText(surface, text); alloc.free(text); },
+            .upload_files => |upload| executeUpload(alloc, surface, upload),
+            .reject => window.performBindingAction(.paste_from_clipboard),
+        }
+    }
+
+    fn resolveTransferTarget(self: *Self) image_transfer.Target {
+        const priv = self.private();
+        const manager = priv.manager orelse return .local;
+        const ws = manager.selectedWorkspace() orelse return .local;
+        if (ws.isRemoteWorkspace()) return .{ .remote = .workspace_remote };
+        const surface = self.getActiveSurface() orelse return .local;
+        const panel_id = self.surfaceUuid(surface) orelse return .local;
+        const tty_name = ws.surface_tty_names.get(panel_id) orelse return .local;
+        if (SshSessionDetector.detect(Application.default().allocator(), tty_name)) |session|
+            return .{ .remote = .{ .detected_ssh = session } };
+        return .local;
+    }
+
+    fn pasteText(surface: *Surface, text: [:0]const u8) void {
+        if (text.len == 0) return;
+        const cs = surface.core() orelse return;
+        cs.completeClipboardRequest(.paste, text, false) catch |err| {
+            log.warn("paste failed: {}", .{err});
+        };
+    }
+
+    /// Context for async upload running on a background thread.
+    const UploadContext = struct {
+        alloc: Allocator,
+        window: *Self,
+        surface: *Surface,
+        session: SshSessionDetector.DetectedSession,
+        paths: []const []const u8,
+        operation: image_transfer.Operation,
+        result: image_transfer.UploadResult,
+        toast: ?*adw.Toast = null,
+        indicator_timer: c_uint = 0,
+
+        fn destroy(self: *UploadContext) void {
+            self.window.unref();
+            self.surface.unref();
+            self.alloc.destroy(self);
+        }
+    };
+
+    fn executeUpload(alloc: Allocator, surface: *Surface, up: image_transfer.Plan.UploadFilesPlan) void {
+        switch (up.target) {
+            .workspace_remote => {
+                log.warn("workspace-remote upload not yet implemented", .{});
+                if (image_transfer.joinEscapedPaths(alloc, up.paths)) |t| {
+                    pasteText(surface, t);
+                    alloc.free(t);
+                }
+            },
+            .detected_ssh => |session| {
+                // Get the window from the surface widget tree.
+                const root = surface.as(gtk.Widget).getRoot() orelse return;
+                const window = gobject.ext.cast(Self, root.as(gobject.Object)) orelse return;
+
+                const ctx = alloc.create(UploadContext) catch return;
+                ctx.* = .{
+                    .alloc = alloc,
+                    .window = window.ref(),
+                    .surface = surface.ref(),
+                    .session = session,
+                    .paths = up.paths,
+                    .operation = .{},
+                    .result = .{ .failure = "" },
+                };
+
+                // Show upload indicator after 150ms (avoids flash for fast transfers).
+                ctx.indicator_timer = cmux.dispatch.timeout_add_fn(150, &showUploadIndicator, ctx);
+
+                _ = std.Thread.spawn(.{}, uploadThread, .{ctx}) catch |err| {
+                    log.err("failed to spawn upload thread: {}", .{err});
+                    if (ctx.indicator_timer != 0) {
+                        _ = glib.Source.remove(ctx.indicator_timer);
+                    }
+                    ctx.destroy();
+                    return;
+                };
+            },
+        }
+    }
+
+    fn showUploadIndicator(ud: ?*anyopaque) callconv(.c) c_int {
+        const ctx: *UploadContext = @ptrCast(@alignCast(ud orelse return 0));
+        ctx.indicator_timer = 0;
+
+        // Show a toast with "Uploading..." text.
+        const toast = adw.Toast.new("Uploading\u{2026}");
+        toast.setTimeout(0); // Don't auto-dismiss.
+        ctx.toast = toast;
+        ctx.window.private().toast_overlay.addToast(toast);
+
+        return 0; // G_SOURCE_REMOVE — don't repeat.
+    }
+
+    fn uploadThread(ctx: *UploadContext) void {
+        ctx.result = image_transfer.uploadViaDetectedSsh(
+            ctx.alloc, &ctx.session, ctx.paths, &ctx.operation,
+        );
+        cmux.dispatch.idleAdd(&uploadComplete, ctx);
+    }
+
+    fn uploadComplete(ud: ?*anyopaque) callconv(.c) c_int {
+        const ctx: *UploadContext = @ptrCast(@alignCast(ud orelse return 0));
+        defer ctx.destroy();
+
+        // Cancel the indicator timer if it hasn't fired yet.
+        if (ctx.indicator_timer != 0) {
+            _ = glib.Source.remove(ctx.indicator_timer);
+        }
+
+        // Dismiss the toast if it's showing.
+        if (ctx.toast) |toast| {
+            toast.dismiss();
+        }
+
+        switch (ctx.result) {
+            .success => |rps| {
+                if (image_transfer.joinEscapedPaths(ctx.alloc, rps)) |t| {
+                    pasteText(ctx.surface, t);
+                    ctx.alloc.free(t);
+                }
+                for (rps) |rp| ctx.alloc.free(rp);
+                ctx.alloc.free(rps);
+            },
+            .failure => |detail| {
+                log.err("upload failed: {s}", .{detail});
+                // Show error toast.
+                const err_toast = adw.Toast.new("Upload failed");
+                err_toast.setTimeout(3);
+                ctx.window.private().toast_overlay.addToast(err_toast);
+            },
+        }
+
+        return 0; // G_SOURCE_REMOVE
+    }
+
+    fn uriDecode(alloc: Allocator, encoded: []const u8) ?[]const u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        var i: usize = 0;
+        while (i < encoded.len) {
+            if (encoded[i] == '%' and i + 2 < encoded.len) {
+                const hi = hexNibble(encoded[i + 1]) orelse { out.append(alloc, encoded[i]) catch return null; i += 1; continue; };
+                const lo = hexNibble(encoded[i + 2]) orelse { out.append(alloc, encoded[i]) catch return null; i += 1; continue; };
+                out.append(alloc, (hi << 4) | lo) catch return null;
+                i += 3;
+            } else { out.append(alloc, encoded[i]) catch return null; i += 1; }
+        }
+        return out.toOwnedSlice(alloc) catch null;
+    }
+
+    fn hexNibble(c: u8) ?u8 {
+        return if (c >= '0' and c <= '9') c - '0'
+        else if (c >= 'a' and c <= 'f') c - 'a' + 10
+        else if (c >= 'A' and c <= 'F') c - 'A' + 10
+        else null;
+    }
     fn actionPaste(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        // Route through image transfer planner if clipboard has file URIs or images.
+        // Priority matches macOS preparePaste: URIs > text > image.
+        const surface = self.getActiveSurface() orelse return;
+        const widget = surface.as(gtk.Widget);
+        const clipboard = widget.getClipboard();
+        const formats = clipboard.getFormats();
+
+        if (formats.containMimeType("text/uri-list") != 0) {
+            const alloc = Application.default().allocator();
+            const ud = alloc.create(ImageTransferRequest) catch return;
+            ud.* = .{ .window = self.ref(), .surface = surface.ref() };
+            clipboard.readTextAsync(null, &onUriListRead, ud);
+            return;
+        }
+        if (formats.containGtype(gobject.ext.types.string) != 0) {
+            self.performBindingAction(.paste_from_clipboard);
+            return;
+        }
+        if (formats.containGtype(gdk.Texture.getGObjectType()) != 0) {
+            const alloc = Application.default().allocator();
+            const ud = alloc.create(ImageTransferRequest) catch return;
+            ud.* = .{ .window = self.ref(), .surface = surface.ref() };
+            clipboard.readTextureAsync(null, &onTextureRead, ud);
+            return;
+        }
         self.performBindingAction(.paste_from_clipboard);
     }
 
@@ -467,6 +749,259 @@ pub const CmuxWindow = extern struct {
 
     fn actionClear(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         self.performBindingAction(.clear_screen);
+    }
+
+    fn actionSendFeedback(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.showFeedbackComposer();
+    }
+
+    // -----------------------------------------------------------------
+    // Help menu and feedback composer
+    // -----------------------------------------------------------------
+
+    fn onHelpClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+
+        // Create the popover lazily on first click
+        if (priv.help_popover == null) {
+            priv.help_popover = self.buildHelpPopover();
+        }
+        const popover = priv.help_popover orelse return;
+
+        // Parent the popover to the help button if not already done
+        if (popover.as(gtk.Widget).getParent() == null) {
+            popover.as(gtk.Widget).setParent(priv.help_btn.as(gtk.Widget));
+        }
+        popover.popup();
+    }
+
+    fn buildHelpPopover(self: *Self) *gtk.Popover {
+        const box = gtk.Box.new(.vertical, 4);
+        box.as(gtk.Widget).setMarginTop(6);
+        box.as(gtk.Widget).setMarginBottom(6);
+        box.as(gtk.Widget).setMarginStart(6);
+        box.as(gtk.Widget).setMarginEnd(6);
+
+        // "Keyboard Shortcuts" menu item
+        const kbd_btn = gtk.Button.newWithLabel("Keyboard Shortcuts");
+        kbd_btn.as(gtk.Widget).addCssClass("flat");
+        kbd_btn.as(gtk.Widget).setHalign(.fill);
+        kbd_btn.as(gtk.Widget).setName("Keyboard Shortcuts");
+        _ = gtk.Button.signals.clicked.connect(kbd_btn, *Self, &onKeyboardShortcutsClicked, self, .{});
+        box.append(kbd_btn.as(gtk.Widget));
+
+        // "Send Feedback" menu item
+        const fb_btn = gtk.Button.newWithLabel("Send Feedback");
+        fb_btn.as(gtk.Widget).addCssClass("flat");
+        fb_btn.as(gtk.Widget).setHalign(.fill);
+        fb_btn.as(gtk.Widget).setName("Send Feedback");
+        _ = gtk.Button.signals.clicked.connect(fb_btn, *Self, &onSendFeedbackClicked, self, .{});
+        box.append(fb_btn.as(gtk.Widget));
+
+        const popover = gtk.Popover.new();
+        popover.setChild(box.as(gtk.Widget));
+        popover.setHasArrow(0);
+        popover.setPosition(.top);
+        return popover;
+    }
+
+    fn onKeyboardShortcutsClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        if (priv.help_popover) |popover| popover.popdown();
+        self.showKeyboardShortcuts();
+    }
+
+    fn onSendFeedbackClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        if (priv.help_popover) |popover| popover.popdown();
+        self.showFeedbackComposer();
+    }
+
+    fn showKeyboardShortcuts(self: *Self) void {
+        const priv = self.private();
+
+        // Remove previous overlay if any
+        if (priv.shortcuts_overlay) |old| {
+            old.setVisible(0);
+            if (old.getParent()) |parent| {
+                if (gobject.ext.cast(gtk.Box, parent)) |pbox| {
+                    pbox.remove(old);
+                }
+            }
+            priv.shortcuts_overlay = null;
+        }
+
+        const content = gtk.Box.new(.vertical, 12);
+        content.as(gtk.Widget).setMarginTop(20);
+        content.as(gtk.Widget).setMarginBottom(20);
+        content.as(gtk.Widget).setMarginStart(20);
+        content.as(gtk.Widget).setMarginEnd(20);
+
+        const title_label = gtk.Label.new("Keyboard Shortcuts");
+        title_label.as(gtk.Widget).addCssClass("title-2");
+        title_label.setXalign(0);
+        content.append(title_label.as(gtk.Widget));
+
+        const shortcut_list = buildShortcutList();
+        content.append(shortcut_list);
+
+        // Hint label -- accessible name "ShortcutRecordingHint"
+        const hint = gtk.Label.new("Click a shortcut value to record a new shortcut.");
+        hint.as(gtk.Widget).addCssClass("dim-label");
+        hint.as(gtk.Widget).addCssClass("caption");
+        hint.setXalign(0);
+        hint.as(gtk.Widget).setName("ShortcutRecordingHint");
+        content.append(hint.as(gtk.Widget));
+
+        const close_btn = gtk.Button.newWithLabel("Close");
+        close_btn.as(gtk.Widget).setHalign(.start);
+        _ = gtk.Button.signals.clicked.connect(close_btn, *Self, &onShortcutsClose, self, .{});
+        content.append(close_btn.as(gtk.Widget));
+
+        const scrolled = gtk.ScrolledWindow.new();
+        scrolled.setChild(content.as(gtk.Widget));
+        scrolled.as(gtk.Widget).setVexpand(1);
+        scrolled.as(gtk.Widget).setHexpand(1);
+
+        priv.toast_overlay.setChild(scrolled.as(gtk.Widget));
+        priv.shortcuts_overlay = scrolled.as(gtk.Widget);
+    }
+
+    fn buildShortcutList() *gtk.Widget {
+        const list = gtk.Box.new(.vertical, 6);
+
+        const ShortcutEntry = struct { l: [:0]const u8, a: [:0]const u8 };
+        const entries = [_]ShortcutEntry{
+            .{ .l = "New Workspace", .a = "Ctrl+Shift+N" },
+            .{ .l = "Close Workspace", .a = "Ctrl+Shift+W" },
+            .{ .l = "Toggle Sidebar", .a = "Ctrl+B" },
+            .{ .l = "Split Right", .a = "Ctrl+Shift+D" },
+            .{ .l = "Split Down", .a = "Ctrl+Shift+E" },
+            .{ .l = "Copy", .a = "Ctrl+Shift+C" },
+            .{ .l = "Paste", .a = "Ctrl+Shift+V" },
+            .{ .l = "Command Palette", .a = "Ctrl+Shift+P" },
+            .{ .l = "Send Feedback", .a = "Ctrl+Alt+F" },
+        };
+
+        for (&entries) |*entry| {
+            const row = gtk.Box.new(.horizontal, 12);
+            row.as(gtk.Widget).setMarginTop(2);
+            row.as(gtk.Widget).setMarginBottom(2);
+
+            const name_label = gtk.Label.new(entry.l);
+            name_label.setXalign(0);
+            name_label.as(gtk.Widget).setHexpand(1);
+            row.append(name_label.as(gtk.Widget));
+
+            const accel_label = gtk.Label.new(entry.a);
+            accel_label.as(gtk.Widget).addCssClass("dim-label");
+            row.append(accel_label.as(gtk.Widget));
+
+            list.append(row.as(gtk.Widget));
+        }
+
+        return list.as(gtk.Widget);
+    }
+
+    fn onShortcutsClose(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        if (priv.shortcuts_overlay != null) {
+            priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
+            priv.shortcuts_overlay = null;
+        }
+    }
+
+    fn showFeedbackComposer(self: *Self) void {
+        const priv = self.private();
+        if (priv.feedback_overlay != null) return;
+
+        const content = gtk.Box.new(.vertical, 12);
+        content.as(gtk.Widget).setMarginTop(20);
+        content.as(gtk.Widget).setMarginBottom(20);
+        content.as(gtk.Widget).setMarginStart(20);
+        content.as(gtk.Widget).setMarginEnd(20);
+        content.as(gtk.Widget).setHalign(.center);
+        content.as(gtk.Widget).setValign(.center);
+        content.as(gtk.Widget).addCssClass("card");
+        content.as(gtk.Widget).setSizeRequest(480, -1);
+
+        // Title
+        const title_label = gtk.Label.new("Send Feedback");
+        title_label.as(gtk.Widget).addCssClass("title-2");
+        title_label.setXalign(0);
+        content.append(title_label.as(gtk.Widget));
+
+        // Email field
+        const email_entry = gtk.Entry.new();
+        email_entry.setPlaceholderText("you@example.com");
+        email_entry.as(gtk.Widget).setName("SidebarFeedbackEmailField");
+        content.append(email_entry.as(gtk.Widget));
+
+        // Message
+        const msg_frame = gtk.Frame.new("Message");
+        const msg_view = gtk.TextView.new();
+        msg_view.as(gtk.Widget).setVexpand(1);
+        msg_view.as(gtk.Widget).setSizeRequest(-1, 120);
+        msg_frame.setChild(msg_view.as(gtk.Widget));
+        content.append(msg_frame.as(gtk.Widget));
+
+        // Button row
+        const btn_row = gtk.Box.new(.horizontal, 8);
+        btn_row.as(gtk.Widget).setHalign(.fill);
+
+        const attach_btn = gtk.Button.newWithLabel("Attach Images");
+        attach_btn.as(gtk.Widget).setName("SidebarFeedbackAttachButton");
+        btn_row.append(attach_btn.as(gtk.Widget));
+
+        const spacer = gtk.Box.new(.horizontal, 0);
+        spacer.as(gtk.Widget).setHexpand(1);
+        btn_row.append(spacer.as(gtk.Widget));
+
+        const cancel_btn = gtk.Button.newWithLabel("Cancel");
+        _ = gtk.Button.signals.clicked.connect(cancel_btn, *Self, &onFeedbackCancel, self, .{});
+        btn_row.append(cancel_btn.as(gtk.Widget));
+
+        const send_btn = gtk.Button.newWithLabel("Send");
+        send_btn.as(gtk.Widget).addCssClass("suggested-action");
+        send_btn.as(gtk.Widget).setName("SidebarFeedbackSendButton");
+        _ = gtk.Button.signals.clicked.connect(send_btn, *Self, &onFeedbackSend, self, .{});
+        btn_row.append(send_btn.as(gtk.Widget));
+
+        content.append(btn_row.as(gtk.Widget));
+
+        // Footer
+        const footer = gtk.Label.new("A human will read this! You can also reach us at founders@manaflow.com.");
+        footer.as(gtk.Widget).addCssClass("dim-label");
+        footer.as(gtk.Widget).addCssClass("caption");
+        footer.setXalign(0);
+        footer.setWrap(1);
+        content.append(footer.as(gtk.Widget));
+
+        const overlay_box = gtk.Box.new(.vertical, 0);
+        overlay_box.as(gtk.Widget).setVexpand(1);
+        overlay_box.as(gtk.Widget).setHexpand(1);
+        overlay_box.as(gtk.Widget).setValign(.fill);
+        overlay_box.as(gtk.Widget).setHalign(.fill);
+        overlay_box.append(content.as(gtk.Widget));
+
+        priv.toast_overlay.setChild(overlay_box.as(gtk.Widget));
+        priv.feedback_overlay = overlay_box.as(gtk.Widget);
+    }
+
+    fn onFeedbackCancel(_: *gtk.Button, self: *Self) callconv(.c) void {
+        self.dismissFeedbackComposer();
+    }
+
+    fn onFeedbackSend(_: *gtk.Button, self: *Self) callconv(.c) void {
+        self.dismissFeedbackComposer();
+    }
+
+    fn dismissFeedbackComposer(self: *Self) void {
+        const priv = self.private();
+        if (priv.feedback_overlay != null) {
+            priv.toast_overlay.setChild(priv.workspace_stack.as(gtk.Widget));
+            priv.feedback_overlay = null;
+        }
     }
 
     fn actionFocusAddressBar(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
@@ -480,6 +1015,316 @@ pub const CmuxWindow = extern struct {
                 return;
             }
         }
+    }
+
+    fn actionToggleSidebar(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.toggleSidebar(null);
+    }
+
+
+    fn actionCloseWindow(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.showCloseWindowDialog();
+    }
+
+    fn showCloseWindowDialog(self: *Self) void {
+        const priv = self.private();
+        const dialog = adw.AlertDialog.new("Close window?", "All workspaces in this window will be closed.");
+        _ = dialog.addResponse("cancel", "Cancel");
+        _ = dialog.addResponse("close", "Close");
+        dialog.setResponseAppearance("close", .destructive);
+        dialog.setDefaultResponse("close");
+        priv.active_close_dialog = dialog;
+        priv.active_close_dialog_on_confirm = .close_window;
+        _ = adw.AlertDialog.signals.response.connect(dialog, *Self, onCloseDialogResponse, self, .{});
+        dialog.as(adw.Dialog).present(self.as(gtk.Widget));
+    }
+
+    fn actionConfirmClose(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        // If a close dialog is active, confirm it programmatically
+        if (priv.active_close_dialog) |dialog| {
+            // TODO: forceClose not available, use close on parent Window
+            _ = dialog;
+            self.executeCloseDialogAction();
+        }
+    }
+
+    fn executeCloseDialogAction(self: *Self) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const action = priv.active_close_dialog_on_confirm orelse return;
+        const alloc = Application.default().allocator();
+
+        defer {
+            if (priv.active_close_dialog_on_confirm) |a| {
+                switch (a) {
+                    .close_workspaces => |ids| alloc.free(ids),
+                    else => {},
+                }
+            }
+            priv.active_close_dialog = null;
+            priv.active_close_dialog_on_confirm = null;
+        }
+
+        switch (action) {
+            .close_window => self.as(gtk.Window).close(),
+            .close_workspace => |id| manager.closeWorkspace(id) catch {},
+            .close_workspaces => |ids| {
+                for (ids) |id| manager.closeWorkspace(id) catch {};
+            },
+        }
+    }
+
+    fn actionToggleNotifications(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        if (priv.notifications_popover) |np| {
+            np.toggle();
+        } else {
+            // Create lazily on first use
+            const np = Application.default().allocator().create(NotificationsPopover) catch return;
+            np.* = NotificationsPopover.create(
+                priv.notifications_btn.?.as(gtk.Widget),
+            );
+            if (priv.server) |server| {
+                np.notification_store = &server.notification_store;
+            }
+            priv.notifications_popover = np;
+            np.toggle();
+        }
+    }
+
+    fn actionJumpToUnread(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const server = priv.server orelse return;
+        const store = &server.notification_store;
+        const notifications = store.getNotifications();
+        // Find latest unread notification (last in list that's unread)
+        var latest_tab: ?cmux.Uuid = null;
+        var i = notifications.len;
+        while (i > 0) {
+            i -= 1;
+            if (!notifications[i].is_read) {
+                latest_tab = notifications[i].tab_id;
+                break;
+            }
+        }
+        const tab_id = latest_tab orelse return;
+        const manager = priv.manager orelse return;
+        manager.selectWorkspace(tab_id);
+    }
+
+    fn actionOpenFeedback(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("open-feedback action triggered", .{});
+    }
+
+    fn actionOpenSettings(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("open-settings action triggered", .{});
+    }
+
+    fn actionCommandPaletteCommands(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("command-palette-commands action triggered", .{});
+    }
+
+    fn actionCommandPaletteSwitcher(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("command-palette-switcher action triggered", .{});
+    }
+
+    fn actionRename(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("rename action triggered", .{});
+    }
+
+    fn actionRenameWorkspace(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("rename-workspace action triggered", .{});
+    }
+
+    fn actionFind(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("find action triggered", .{});
+    }
+
+    fn actionGotoSplitLeft(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.left, "left");
+    }
+
+    fn actionGotoSplitDown(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.down, "down");
+    }
+
+    fn actionGotoSplitUp(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.up, "up");
+    }
+
+    fn actionGotoSplitRight(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.right, "right");
+    }
+
+    fn actionPaneSwitchLeft(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.left, "left");
+    }
+
+    fn actionPaneSwitchRight(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performGotoSplit(.right, "right");
+    }
+
+    fn actionOpenBrowserInPane(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("open-browser-in-pane action triggered", .{});
+    }
+
+    fn actionZoomToggle(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performBindingAction(.toggle_split_zoom);
+    }
+
+    fn actionNextSurface(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performBindingAction(.{ .goto_split = .next });
+    }
+
+    fn actionPrevSurface(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        self.performBindingAction(.{ .goto_split = .previous });
+    }
+
+    fn actionTriggerFlash(_: *gio.SimpleAction, _: ?*glib.Variant, _: *Self) callconv(.c) void {
+        log.info("trigger-flash action triggered", .{});
+    }
+
+    fn performGotoSplit(self: *Self, direction: input.SplitFocusDirection, direction_name: []const u8) void {
+        self.performBindingAction(.{ .goto_split = direction });
+        cmux.ui_test_harness.writeGotoSplitData(&.{
+            .{ .key = "lastMoveDirection", .value = direction_name },
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Sidebar resizer — draggable handle between sidebar and content
+    // -----------------------------------------------------------------
+
+    /// Maximum ratio of window width the sidebar may consume.
+    /// Matches macOS maximumSidebarWidthRatio (1/3).
+    const maximum_sidebar_width_ratio: f64 = 1.0 / 3.0;
+
+    fn loadResizerCss() void {
+        const css =
+            \\.sidebar-resizer {
+            \\  min-width: 8px;
+            \\  background-color: transparent;
+            \\}
+            \\.sidebar-resizer:hover {
+            \\  background-color: alpha(@borders, 0.3);
+            \\}
+        ;
+        const provider = gtk.CssProvider.new();
+        const bytes = glib.Bytes.new(css.ptr, css.len);
+        defer bytes.unref();
+        provider.loadFromBytes(bytes);
+
+        if (gdk.Display.getDefault()) |display| {
+            gtk.StyleContext.addProviderForDisplay(
+                display,
+                provider.as(gtk.StyleProvider),
+                gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    }
+
+    fn setupSidebarResizer(self: *Self) void {
+        const priv = self.private();
+        const resizer_widget = priv.sidebar_resizer.as(gtk.Widget);
+
+        // Load CSS for the resizer handle.
+        loadResizerCss();
+
+        // Make the resizer wide enough to grab (8px) and set resize cursor.
+        resizer_widget.setSizeRequest(8, -1);
+        resizer_widget.setCursorFromName("col-resize");
+
+        // Attach a drag gesture to the resizer.
+        const drag = gtk.GestureDrag.new();
+        drag.as(gtk.GestureSingle).setButton(1); // left mouse button only
+        _ = gtk.GestureDrag.signals.drag_begin.connect(
+            drag, *Self, onResizerDragBegin, self, .{},
+        );
+        _ = gtk.GestureDrag.signals.drag_update.connect(
+            drag, *Self, onResizerDragUpdate, self, .{},
+        );
+        _ = gtk.GestureDrag.signals.drag_end.connect(
+            drag, *Self, onResizerDragEnd, self, .{},
+        );
+        resizer_widget.addController(drag.as(gtk.EventController));
+
+        // Apply the initial sidebar width.
+        self.applySidebarWidth(priv.sidebar_width);
+
+        // Sync the toggle button state.
+        priv.sidebar_toggle.setActive(@intFromBool(priv.sidebar_visible));
+    }
+
+    fn onResizerDragBegin(
+        _: *gtk.GestureDrag,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        priv.drag_start_width = priv.sidebar_width;
+    }
+
+    fn onResizerDragUpdate(
+        _: *gtk.GestureDrag,
+        offset_x: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        const start = priv.drag_start_width orelse priv.sidebar_width;
+        const candidate = start + offset_x;
+        const clamped = self.clampedSidebarWidth(candidate);
+        self.applySidebarWidth(clamped);
+    }
+
+    fn onResizerDragEnd(
+        _: *gtk.GestureDrag,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        self.private().drag_start_width = null;
+    }
+
+    /// Clamp sidebar width to [minimum, min(maximum, window_width * ratio)].
+    fn clampedSidebarWidth(self: *Self, candidate: f64) f64 {
+        const policy = cmux.persistence.policy;
+        const min_w = policy.minimum_sidebar_width;
+
+        // Dynamic maximum: at most 1/3 of window width (matches Mac).
+        var max_w = policy.maximum_sidebar_width;
+        const win_width: f64 = @floatFromInt(self.as(gtk.Widget).getWidth());
+        if (win_width > 0) {
+            const dynamic_max = win_width * maximum_sidebar_width_ratio;
+            max_w = @min(max_w, @max(min_w, dynamic_max));
+        }
+
+        if (!std.math.isFinite(candidate)) return policy.default_sidebar_width;
+        return @min(@max(candidate, min_w), max_w);
+    }
+
+    /// Apply a new sidebar width (pixel value) to the sidebar container.
+    fn applySidebarWidth(self: *Self, width: f64) void {
+        const priv = self.private();
+        priv.sidebar_width = width;
+        const w: c_int = @intFromFloat(@round(width));
+        priv.sidebar_box.as(gtk.Widget).setSizeRequest(w, -1);
+    }
+
+
+    /// Query sidebar visibility (used by debug commands).
+    pub fn isSidebarVisible(self: *Self) bool {
+        return self.private().sidebar_visible;
+    }
+
+    /// Sidebar toggle button callback from BLP template.
+    fn onSidebarToggleClicked(
+        _: *gtk.ToggleButton,
+        self: *Self,
+    ) callconv(.c) void {
+        self.toggleSidebar(null);
     }
 
     // -----------------------------------------------------------------
@@ -822,6 +1667,11 @@ pub const CmuxWindow = extern struct {
         if (self.findSidebarRow(id)) |row| {
             self.updateSidebarRow(row, ws);
         }
+
+        // Rebuild pane tab bar if the updated workspace is selected.
+        if (manager.selected_id) |sel| {
+            if (sel.eql(id)) self.rebuildPaneTabBar();
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1037,6 +1887,9 @@ pub const CmuxWindow = extern struct {
     ) callconv(.c) void {
         const ws_id = self.workspaceIdForSplitTree(split_tree) orelse return;
         self.syncSurfacesForTree(ws_id, old_tree, new_tree);
+
+        // Rebuild pane tab bar since panel set may have changed.
+        self.rebuildPaneTabBar();
     }
 
     // -----------------------------------------------------------------
@@ -1166,6 +2019,381 @@ pub const CmuxWindow = extern struct {
     }
 
     // -----------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // Sidebar toggle (public API for socket commands)
+    // -----------------------------------------------------------------
+
+    /// Toggle the sidebar visibility. If `force` is non-null, set to that value.
+    pub fn toggleSidebar(self: *Self, force: ?bool) void {
+        const priv = self.private();
+        const current = priv.sidebar_visible;
+        const target = force orelse !current;
+        priv.sidebar_visible = target;
+        priv.sidebar_box.as(gtk.Widget).setVisible(@intFromBool(target));
+        priv.sidebar_resizer.as(gtk.Widget).setVisible(@intFromBool(target));
+        priv.sidebar_toggle.setActive(@intFromBool(target));
+    }
+
+    fn onToggleSidebar(_: *gtk.Button, self: *Self) callconv(.c) void {
+        self.toggleSidebar(null);
+    }
+
+    fn onShowNotifications(_: *gtk.Button, _: *Self) callconv(.c) void {
+        // Placeholder — will be wired when NotificationsPopover is implemented.
+        log.info("notifications button clicked", .{});
+    }
+
+    // -----------------------------------------------------------------
+    // Pane tab bar — programmatic setup and rebuild
+    // -----------------------------------------------------------------
+
+    /// Create the pane tab bar widget and insert it into the content area
+    /// above the workspace content. Called once during window construction.
+    fn buildPaneTabBar(self: *Self) void {
+        const priv = self.private();
+
+        const tab_bar = gtk.Box.new(.horizontal, 0);
+        tab_bar.as(gtk.Widget).addCssClass("cmux-pane-tab-bar");
+        priv.pane_tab_bar = tab_bar;
+
+        // Insert the tab bar above the toast overlay content. Find the
+        // Adw.ToolbarView ancestor and add it as a top bar.
+        const toast_widget = priv.toast_overlay.as(gtk.Widget);
+        const tv_widget = toast_widget.getAncestor(adw.ToolbarView.getGObjectType());
+        if (tv_widget) |tvw| {
+            const tv: *adw.ToolbarView = @ptrCast(@alignCast(tvw));
+            tv.addTopBar(tab_bar.as(gtk.Widget));
+        }
+    }
+
+    /// Create titlebar control buttons and insert them into the sidebar area.
+    fn buildTitlebarControls(self: *Self) void {
+        const priv = self.private();
+
+        const controls = gtk.Box.new(.horizontal, 4);
+        controls.as(gtk.Widget).setMarginStart(8);
+        controls.as(gtk.Widget).setMarginEnd(8);
+        controls.as(gtk.Widget).setMarginTop(6);
+        controls.as(gtk.Widget).setMarginBottom(2);
+        priv.titlebar_controls = controls;
+
+        // Toggle sidebar button
+        const toggle_btn = gtk.Button.new();
+        toggle_btn.setIconName("sidebar-show-symbolic");
+        toggle_btn.as(gtk.Widget).addCssClass("flat");
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // toggle_btn.as(gtk.Widget).updateProperty(
+        //     &.{gtk.Widget.AccessibleProperty.label},
+        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.toggleSidebar")},
+        // );
+        _ = gtk.Button.signals.clicked.connect(toggle_btn, *Self, onToggleSidebar, self, .{});
+        controls.append(toggle_btn.as(gtk.Widget));
+        priv.toggle_sidebar_btn = toggle_btn;
+
+        // Notifications button
+        const notif_btn = gtk.Button.new();
+        notif_btn.setIconName("bell-outline-symbolic");
+        notif_btn.as(gtk.Widget).addCssClass("flat");
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // notif_btn.as(gtk.Widget).updateProperty(
+        //     &.{gtk.Widget.AccessibleProperty.label},
+        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.showNotifications")},
+        // );
+        _ = gtk.Button.signals.clicked.connect(notif_btn, *Self, onShowNotifications, self, .{});
+        controls.append(notif_btn.as(gtk.Widget));
+        priv.notifications_btn = notif_btn;
+
+        // New tab button
+        const new_btn = gtk.Button.new();
+        new_btn.setIconName("list-add-symbolic");
+        new_btn.as(gtk.Widget).addCssClass("flat");
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // new_btn.as(gtk.Widget).updateProperty(
+        //     &.{gtk.Widget.AccessibleProperty.label},
+        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.newTab")},
+        // );
+        _ = gtk.Button.signals.clicked.connect(new_btn, *Self, onNewTabClicked, self, .{});
+        controls.append(new_btn.as(gtk.Widget));
+        priv.new_tab_btn = new_btn;
+
+        // Insert controls at the top of the sidebar box.
+        priv.sidebar_box.prepend(controls.as(gtk.Widget));
+    }
+
+    fn onNewTabClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        _ = manager.createWorkspace(.{ .title = "Terminal" }) catch |err| {
+            log.err("failed to create workspace: {}", .{err});
+        };
+    }
+
+    /// Rebuild the pane tab bar from the currently selected workspace's panels.
+    pub fn rebuildPaneTabBar(self: *Self) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const tab_bar = priv.pane_tab_bar orelse return;
+
+        // Remove all existing children from the tab bar.
+        while (tab_bar.as(gtk.Widget).getFirstChild()) |child| {
+            tab_bar.remove(child);
+        }
+        priv.new_terminal_btn = null;
+
+        // Get selected workspace's panels.
+        const ws = manager.selectedWorkspace() orelse return;
+
+        // Create a button for each panel in the workspace.
+        var it = ws.panels.iterator();
+        while (it.next()) |entry| {
+            const panel_id = entry.key_ptr.*;
+            const panel = entry.value_ptr;
+
+            // Determine the tab title.
+            const title: []const u8 = if (ws.panel_custom_titles.get(panel_id)) |ct|
+                ct
+            else if (ws.panel_titles.get(panel_id)) |pt|
+                pt
+            else switch (panel.*) {
+                .terminal => "Terminal",
+                .browser => "Browser",
+                .markdown => "Markdown",
+            };
+
+            var title_buf: [256:0]u8 = undefined;
+            const btn = gtk.Button.newWithLabel(sliceToZ(&title_buf, title));
+            btn.as(gtk.Widget).addCssClass("flat");
+            btn.as(gtk.Widget).addCssClass("cmux-pane-tab");
+
+            // Set the widget name to the panel UUID for identification.
+            const name = uuidToName(panel_id);
+            btn.as(gtk.Widget).setName(&name);
+
+            // TODO: updateProperty not available in current GTK4 Zig bindings.
+            // btn.as(gtk.Widget).updateProperty(
+            //     &.{gtk.Widget.AccessibleProperty.label},
+            //     &.{gtk.Widget.AccessibleProperty.label.Value(sliceToZ(&title_buf, title)),
+            // );
+
+            // Connect click handler.
+            _ = gtk.Button.signals.clicked.connect(btn, *Self, onPaneTabClicked, self, .{});
+
+            // Drag source for tab reordering.
+            const drag_source = gtk.DragSource.new();
+            drag_source.setActions(.{ .move = true });
+            _ = gtk.DragSource.signals.prepare.connect(drag_source, *Self, onTabDragPrepare, self, .{});
+            _ = gtk.DragSource.signals.drag_end.connect(drag_source, *Self, onTabDragEnd, self, .{});
+            btn.as(gtk.Widget).addController(drag_source.as(gtk.EventController));
+
+            // Drop target for tab reordering.
+            const drop_target = gtk.DropTarget.new(gobject.ext.types.string, .{ .move = true });
+            _ = gtk.DropTarget.signals.motion.connect(drop_target, *Self, onTabDropMotion, self, .{});
+            _ = gtk.DropTarget.signals.leave.connect(drop_target, *Self, onTabDropLeave, self, .{});
+            _ = gtk.DropTarget.signals.drop.connect(drop_target, *Self, onTabDropDrop, self, .{});
+            btn.as(gtk.Widget).addController(drop_target.as(gtk.EventController));
+
+            tab_bar.append(btn.as(gtk.Widget));
+        }
+
+        // Append new-terminal trailing button.
+        const new_term_btn = gtk.Button.new();
+        new_term_btn.setIconName("list-add-symbolic");
+        new_term_btn.as(gtk.Widget).addCssClass("flat");
+        new_term_btn.as(gtk.Widget).addCssClass("cmux-pane-tab-new");
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // new_term_btn.as(gtk.Widget).updateProperty(
+        //     &.{gtk.Widget.AccessibleProperty.label},
+        //     &.{gtk.Widget.AccessibleProperty.label.Value("paneTabBarControl.newTerminal")},
+        // );
+        _ = gtk.Button.signals.clicked.connect(new_term_btn, *Self, onNewTerminalClicked, self, .{});
+        tab_bar.append(new_term_btn.as(gtk.Widget));
+        priv.new_terminal_btn = new_term_btn;
+    }
+
+    fn onPaneTabClicked(btn: *gtk.Button, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.selectedWorkspace() orelse return;
+        const widget_name: [*:0]const u8 = btn.as(gtk.Widget).getName();
+        const panel_id = nameToUuid(widget_name) orelse return;
+
+        ws.focused_panel_id = panel_id;
+        if (priv.surface_map.get(panel_id)) |surface| {
+            _ = surface.as(gtk.Widget).grabFocus();
+        }
+    }
+
+    fn onNewTerminalClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        self.performBindingAction(.{ .new_split = .right });
+    }
+
+    // -----------------------------------------------------------------
+    // Pane tab bar drag & drop
+    // -----------------------------------------------------------------
+
+    fn onTabDragPrepare(source: *gtk.DragSource, _: f64, _: f64, self: *Self) callconv(.c) ?*gdk.ContentProvider {
+        const priv = self.private();
+        const widget = source.as(gtk.EventController).getWidget() orelse return null;
+        const widget_name: [*:0]const u8 = widget.getName();
+        const panel_id = nameToUuid(widget_name) orelse return null;
+
+        priv.tab_dragged_panel_id = panel_id;
+        priv.tab_drop_indicator = null;
+
+        const formatted = panel_id.format();
+        const bytes = glib.Bytes.new(&formatted, formatted.len);
+        defer bytes.unref();
+        return gdk.ContentProvider.newForBytes("text/plain", bytes);
+    }
+
+    fn onTabDragEnd(_: *gtk.DragSource, _: *gdk.Drag, _: c_int, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        priv.tab_dragged_panel_id = null;
+        self.clearTabDropIndicator();
+    }
+
+    fn onTabDropMotion(target: *gtk.DropTarget, x: f64, _: f64, self: *Self) callconv(.c) gdk.DragAction {
+        const priv = self.private();
+        if (priv.tab_dragged_panel_id == null) return .{ .move = true };
+
+        const widget = target.as(gtk.EventController).getWidget() orelse return .{ .move = true };
+        const widget_name: [*:0]const u8 = widget.getName();
+        const target_panel_id = nameToUuid(widget_name) orelse return .{ .move = true };
+
+        const manager = priv.manager orelse return .{ .move = true };
+        const ws = manager.selectedWorkspace() orelse return .{ .move = true };
+        const dragged_id = priv.tab_dragged_panel_id orelse return .{ .move = true };
+
+        // Build panel_ids array.
+        var panel_ids_buf: [256]cmux.Uuid = undefined;
+        var panel_count: usize = 0;
+        var panel_it = ws.panels.iterator();
+        while (panel_it.next()) |entry_| {
+            if (panel_count < panel_ids_buf.len) {
+                panel_ids_buf[panel_count] = entry_.key_ptr.*;
+                panel_count += 1;
+            }
+        }
+        const panel_ids = panel_ids_buf[0..panel_count];
+
+        // Horizontal: use x and width mapped to the vertical drop planner.
+        const width: f64 = @floatFromInt(widget.getWidth());
+        const new_indicator = drop_planner.indicator(
+            dragged_id,
+            target_panel_id,
+            panel_ids,
+            &.{},
+            x,
+            width,
+        );
+
+        if (!tabIndicatorEql(priv.tab_drop_indicator, new_indicator)) {
+            self.clearTabDropIndicator();
+            priv.tab_drop_indicator = new_indicator;
+            self.showTabDropIndicator();
+        }
+
+        return .{ .move = true };
+    }
+
+    fn onTabDropLeave(_: *gtk.DropTarget, self: *Self) callconv(.c) void {
+        self.clearTabDropIndicator();
+    }
+
+    fn onTabDropDrop(_: *gtk.DropTarget, _: *gobject.Value, _: f64, _: f64, self: *Self) callconv(.c) c_int {
+        const priv = self.private();
+        defer {
+            priv.tab_dragged_panel_id = null;
+            self.clearTabDropIndicator();
+        }
+
+        const manager = priv.manager orelse return 0;
+        const ws = manager.selectedWorkspace() orelse return 0;
+        const dragged_id = priv.tab_dragged_panel_id orelse return 0;
+
+        var panel_ids_buf: [256]cmux.Uuid = undefined;
+        var panel_count: usize = 0;
+        var panel_it = ws.panels.iterator();
+        while (panel_it.next()) |entry_| {
+            if (panel_count < panel_ids_buf.len) {
+                panel_ids_buf[panel_count] = entry_.key_ptr.*;
+                panel_count += 1;
+            }
+        }
+        const panel_ids = panel_ids_buf[0..panel_count];
+
+        const target_idx = drop_planner.targetIndex(
+            dragged_id,
+            null,
+            priv.tab_drop_indicator,
+            panel_ids,
+            &.{},
+        ) orelse return 0;
+
+        ws.movePanelToIndex(dragged_id, target_idx);
+        self.rebuildPaneTabBar();
+        return 1;
+    }
+
+    fn showTabDropIndicator(self: *Self) void {
+        const priv = self.private();
+        const tab_bar = priv.pane_tab_bar orelse return;
+        const ind = priv.tab_drop_indicator orelse return;
+
+        const indicator_widget = gtk.Box.new(.vertical, 0);
+        indicator_widget.as(gtk.Widget).addCssClass("cmux-tab-drop-indicator");
+        indicator_widget.as(gtk.Widget).setSizeRequest(2, -1);
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // indicator_widget.as(gtk.Widget).updateProperty(
+        //     &.{gtk.Widget.AccessibleProperty.label},
+        //     &.{gtk.Widget.AccessibleProperty.label.Value("paneTabBar.dropIndicator")},
+        // );
+
+        if (ind.tab_id) |tab_id| {
+            const tab_name = uuidToName(tab_id);
+            var child = tab_bar.as(gtk.Widget).getFirstChild();
+            while (child) |c| {
+                const cname: [*:0]const u8 = c.getName();
+                if (std.mem.eql(u8, std.mem.span(cname), &tab_name)) {
+                    if (ind.edge == .bottom) {
+                        tab_bar.insertChildAfter(indicator_widget.as(gtk.Widget), c);
+                    } else {
+                        const prev = c.getPrevSibling();
+                        tab_bar.insertChildAfter(indicator_widget.as(gtk.Widget), prev);
+                    }
+                    priv.tab_drop_indicator_widget = indicator_widget.as(gtk.Widget);
+                    return;
+                }
+                child = c.getNextSibling();
+            }
+        }
+
+        tab_bar.append(indicator_widget.as(gtk.Widget));
+        priv.tab_drop_indicator_widget = indicator_widget.as(gtk.Widget);
+    }
+
+    fn clearTabDropIndicator(self: *Self) void {
+        const priv = self.private();
+        if (priv.tab_drop_indicator_widget) |w| {
+            if (priv.pane_tab_bar) |tb| {
+                tb.remove(w);
+            }
+            priv.tab_drop_indicator_widget = null;
+        }
+        priv.tab_drop_indicator = null;
+    }
+
+    fn tabIndicatorEql(a: ?drop_planner.DropIndicator, b: ?drop_planner.DropIndicator) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        const aa = a.?;
+        const bb = b.?;
+        if (aa.edge != bb.edge) return false;
+        if (aa.tab_id == null and bb.tab_id == null) return true;
+        if (aa.tab_id == null or bb.tab_id == null) return false;
+        return aa.tab_id.?.eql(bb.tab_id.?);
+    }
+
     // GLib dispatch wrappers
     // -----------------------------------------------------------------
 
@@ -1283,8 +2511,9 @@ pub const CmuxWindow = extern struct {
             .windows = &.{.{
                 .tab_manager = tm_snap,
                 .sidebar = .{
-                    .is_visible = true,
+                    .is_visible = priv.sidebar_visible,
                     .selection = .tabs,
+                    .width = priv.sidebar_width,
                 },
             }},
         };
@@ -1397,16 +2626,19 @@ pub const CmuxWindow = extern struct {
                 }),
             );
 
-            class.bindTemplateChildPrivate("split_view", .{});
+            class.bindTemplateChildPrivate("sidebar_box", .{});
+            class.bindTemplateChildPrivate("sidebar_resizer", .{});
             class.bindTemplateChildPrivate("sidebar_list", .{});
             class.bindTemplateChildPrivate("workspace_stack", .{});
             class.bindTemplateChildPrivate("window_title", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
+            class.bindTemplateChildPrivate("sidebar_toggle", .{});
             class.bindTemplateChildPrivate("help_btn", .{});
 
             class.bindTemplateCallback("on_add_workspace", &onAddWorkspace);
             class.bindTemplateCallback("on_row_selected", &onRowSelected);
             class.bindTemplateCallback("on_help_clicked", &onHelpClicked);
+            class.bindTemplateCallback("on_sidebar_toggle_clicked", &onSidebarToggleClicked);
 
             gobject.ext.registerProperties(class, &.{
                 properties.config.impl,

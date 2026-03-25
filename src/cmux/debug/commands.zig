@@ -524,21 +524,9 @@ fn debugSidebarVisible(
         visible: bool = false,
 
         fn callback(data: ?*anyopaque) callconv(.c) c_int {
-            const gtk = @import("gtk");
-            const adw = @import("adw");
-            const gobject = @import("gobject");
-
             const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
-            const win: *gtk.Widget = @ptrCast(@alignCast(ctx.window));
-            // Walk the widget tree to find the OverlaySplitView
-            var child = win.getFirstChild();
-            while (child) |c| {
-                if (gobject.ext.cast(adw.OverlaySplitView, c)) |split_view| {
-                    ctx.visible = split_view.getShowSidebar() != 0;
-                    return 0;
-                }
-                child = c.getNextSibling();
-            }
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            ctx.visible = win.isSidebarVisible();
             return 0;
         }
     };
@@ -797,7 +785,10 @@ fn debugCommandPaletteRenameInputDeleteBackward(
             const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
             const palette = win.getCommandPalette() orelse return 0;
             const entry = palette.getRenameEntry() orelse return 0;
-            gtk_mod.Editable.deleteText(entry.as(gtk_mod.Editable), -1, 0);
+            const pos = gtk_mod.Editable.getPosition(entry.as(gtk_mod.Editable));
+            if (pos > 0) {
+                gtk_mod.Editable.deleteText(entry.as(gtk_mod.Editable), pos - 1, pos);
+            }
             return 0;
         }
     };

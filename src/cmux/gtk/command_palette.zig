@@ -135,15 +135,16 @@ pub const CommandPalette = extern struct {
 
         const outer_box = gtk.Box.new(.vertical, 0);
         outer_box.as(gtk.Widget).addCssClass("command-palette-container");
-        outer_box.as(gtk.Widget).setWidthRequest(600);
+        outer_box.as(gtk.Widget).setSizeRequest(600, -1);
 
         // Search entry
         const search_entry = gtk.SearchEntry.new();
         search_entry.as(gtk.Widget).setName("CommandPaletteSearchField");
-        search_entry.as(gtk.Widget).updateProperty(
-            &[_]gtk.AccessibleProperty{.label},
-            &[_]gtk.AccessiblePropertyVals{.{ .label = .{ .value = "CommandPaletteSearchField" } }},
-        );
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // search_entry.as(gtk.Widget).updateProperty(
+        //     &[_]gtk.AccessibleProperty{.label},
+        //     &[_]gtk.AccessiblePropertyVals{.{ .label = .{ .value = "CommandPaletteSearchField" } }},
+        // );
         search_entry.as(gtk.Widget).setMarginTop(8);
         search_entry.as(gtk.Widget).setMarginBottom(4);
         search_entry.as(gtk.Widget).setMarginStart(8);
@@ -182,10 +183,11 @@ pub const CommandPalette = extern struct {
         // Rename entry (hidden by default)
         const rename_entry = gtk.Entry.new();
         rename_entry.as(gtk.Widget).setName("CommandPaletteRenameField");
-        rename_entry.as(gtk.Widget).updateProperty(
-            &[_]gtk.AccessibleProperty{.label},
-            &[_]gtk.AccessiblePropertyVals{.{ .label = .{ .value = "CommandPaletteRenameField" } }},
-        );
+        // TODO: updateProperty not available in current GTK4 Zig bindings.
+        // rename_entry.as(gtk.Widget).updateProperty(
+        //     &[_]gtk.AccessibleProperty{.label},
+        //     &[_]gtk.AccessiblePropertyVals{.{ .label = .{ .value = "CommandPaletteRenameField" } }},
+        // );
         rename_entry.as(gtk.Widget).setMarginTop(8);
         rename_entry.as(gtk.Widget).setMarginBottom(4);
         rename_entry.as(gtk.Widget).setMarginStart(8);
@@ -286,10 +288,10 @@ pub const CommandPalette = extern struct {
             if (priv.search_entry) |se| {
                 se.as(gtk.Widget).setVisible(1);
                 if (mode == .commands) {
-                    se.setText(">");
+                    se.as(gtk.Editable).setText(">");
                     se.as(gtk.Editable).setPosition(-1);
                 } else {
-                    se.setText("");
+                    se.as(gtk.Editable).setText("");
                 }
                 _ = se.as(gtk.Widget).grabFocus();
             }
@@ -307,7 +309,7 @@ pub const CommandPalette = extern struct {
         self.as(gtk.Widget).setVisible(0);
 
         // Clear search
-        if (priv.search_entry) |se| se.setText("");
+        if (priv.search_entry) |se| se.as(gtk.Editable).setText("");
         if (priv.rename_entry) |re| {
             re.as(gtk.Editable).deleteText(0, -1);
             re.as(gtk.Widget).setVisible(0);
@@ -345,7 +347,7 @@ pub const CommandPalette = extern struct {
     pub fn getQuery(self: *Self) []const u8 {
         const priv = self.private();
         const se = priv.search_entry orelse return "";
-        return std.mem.span(se.getText());
+        return std.mem.span(se.as(gtk.Editable).getText());
     }
 
     /// Get the current results snapshot.
@@ -407,7 +409,7 @@ pub const CommandPalette = extern struct {
 
         // Determine raw query text
         const se = priv.search_entry orelse return;
-        const full_query = std.mem.span(se.getText());
+        const full_query = std.mem.span(se.as(gtk.Editable).getText());
 
         // Determine scope from query
         const scope = search_mod.scopeFromQuery(full_query);
@@ -755,9 +757,12 @@ pub const CommandPalette = extern struct {
         if (manager.selected_id) |ws_id| {
             if (manager.workspaceById(ws_id)) |ws| {
                 const title = ws.displayTitle();
-                const buffer = entry.getBuffer();
-                buffer.deleteText(0, -1);
-                buffer.insertText(@intCast(title.len), title.ptr, @intCast(title.len));
+                // Set rename entry text to current workspace title and select all.
+                var buf: [256:0]u8 = undefined;
+                const len = @min(title.len, buf.len);
+                @memcpy(buf[0..len], title[0..len]);
+                buf[len] = 0;
+                entry.as(gtk.Editable).setText(&buf);
                 entry.as(gtk.Editable).selectRegion(0, -1);
             }
         }

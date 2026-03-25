@@ -1186,6 +1186,7 @@ pub const BrowserPanelView = extern struct {
 
     fn commitSuggestion(self: *Self, suggestion: *const omnibar.OmnibarSuggestion) void {
         const priv = self.private();
+        priv.inline_completion = null;
 
         // Copy completion into a local buffer before any state changes
         // (suggestion data may reference state that gets invalidated).
