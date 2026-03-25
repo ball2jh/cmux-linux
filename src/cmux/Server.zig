@@ -295,7 +295,12 @@ fn dispatchV1(self: *Server, arena: Allocator, writer: *client_handler.ResponseW
     if (std.mem.eql(u8, cmd.name, "ping")) {
         v1.raw(writer, "PONG") catch {};
     } else if (std.mem.eql(u8, cmd.name, "help")) {
-        v1.raw(writer, "Available commands: ping, help, notify_target, list_notifications, clear_notifications") catch {};
+        v1.raw(writer,
+            "Available commands: ping, help, new_workspace, list_workspaces, " ++
+            "select_workspace, new_window, current_window, toggle_sidebar, " ++
+            "new_surface, list_surfaces, report_pwd, focus_window, read_terminal_text, " ++
+            "notify, notify_surface, notify_target, list_notifications, clear_notifications",
+        ) catch {};
     } else if (std.mem.eql(u8, cmd.name, "notify")) {
         self.handleV1Notify(writer, cmd.args);
     } else if (std.mem.eql(u8, cmd.name, "notify_surface")) {
@@ -312,6 +317,28 @@ fn dispatchV1(self: *Server, arena: Allocator, writer: *client_handler.ResponseW
         var buf: [4096]u8 = undefined;
         const resp = notification.commands.handleClearNotifications(&self.notification_store, cmd.args, &buf);
         v1.raw(writer, resp) catch {};
+    } else if (std.mem.eql(u8, cmd.name, "new_workspace")) {
+        self.handleV1NewWorkspace(arena, writer);
+    } else if (std.mem.eql(u8, cmd.name, "list_workspaces")) {
+        self.handleV1ListWorkspaces(arena, writer);
+    } else if (std.mem.eql(u8, cmd.name, "select_workspace")) {
+        self.handleV1SelectWorkspace(arena, writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "new_window")) {
+        self.handleV1NewWindow(writer);
+    } else if (std.mem.eql(u8, cmd.name, "current_window")) {
+        self.handleV1CurrentWindow(writer);
+    } else if (std.mem.eql(u8, cmd.name, "toggle_sidebar")) {
+        self.handleV1ToggleSidebar(writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "new_surface")) {
+        self.handleV1NewSurface(arena, writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "list_surfaces")) {
+        self.handleV1ListSurfaces(arena, writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "report_pwd")) {
+        self.handleV1ReportPwd(writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "focus_window")) {
+        self.handleV1FocusWindow(writer, cmd.args);
+    } else if (std.mem.eql(u8, cmd.name, "read_terminal_text")) {
+        self.handleV1ReadTerminalText(arena, writer);
     } else {
         v1.err(writer, "Unknown command") catch {};
     }
@@ -553,23 +580,68 @@ fn handleV1Notify(self: *Server, writer: *client_handler.ResponseWriter, args: [
         v1.err(writer, "ERROR: No workspace manager") catch {};
         return;
     };
-    const ws = mgr.selectedWorkspace() orelse {
-        v1.err(writer, "ERROR: No active workspace") catch {};
-        return;
-    };
 
-    const payload = notification.commands.parseNotificationPayload(args);
-    self.notification_store.addNotification(
-        ws.id,
-        ws.focused_panel_id,
-        payload.title,
-        payload.subtitle,
-        payload.body,
-    ) catch {
-        v1.err(writer, "ERROR: Out of memory") catch {};
-        return;
-    };
-    v1.raw(writer, "OK") catch {};
+    // Check if args use --flag format (new style) or pipe-delimited (legacy).
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "--")) {
+        // Parse: --title TITLE --subtitle SUB --body BODY [--workspace WID] [--surface SID]
+        const parsed = parseV1FlagArgs(trimmed);
+
+        // Resolve workspace: explicit flag or selected.
+        const ws_id = if (parsed.workspace_id.len > 0)
+            Uuid.parse(parsed.workspace_id) catch {
+                v1.err(writer, "ERROR: Invalid workspace ID") catch {};
+                return;
+            }
+        else if (mgr.selectedWorkspace()) |ws|
+            ws.id
+        else {
+            v1.err(writer, "ERROR: No active workspace") catch {};
+            return;
+        };
+
+        // Resolve surface: explicit flag or focused panel.
+        const surface_id: ?Uuid = if (parsed.surface_id.len > 0)
+            Uuid.parse(parsed.surface_id) catch {
+                v1.err(writer, "ERROR: Invalid surface ID") catch {};
+                return;
+            }
+        else if (mgr.workspaceById(ws_id)) |ws|
+            ws.focused_panel_id
+        else
+            null;
+
+        self.notification_store.addNotification(
+            ws_id,
+            surface_id,
+            if (parsed.title.len == 0) "Notification" else parsed.title,
+            parsed.subtitle,
+            parsed.body,
+        ) catch {
+            v1.err(writer, "ERROR: Out of memory") catch {};
+            return;
+        };
+        v1.raw(writer, "OK") catch {};
+    } else {
+        // Legacy pipe-delimited format: title|subtitle|body
+        const ws = mgr.selectedWorkspace() orelse {
+            v1.err(writer, "ERROR: No active workspace") catch {};
+            return;
+        };
+
+        const payload = notification.commands.parseNotificationPayload(args);
+        self.notification_store.addNotification(
+            ws.id,
+            ws.focused_panel_id,
+            payload.title,
+            payload.subtitle,
+            payload.body,
+        ) catch {
+            v1.err(writer, "ERROR: Out of memory") catch {};
+            return;
+        };
+        v1.raw(writer, "OK") catch {};
+    }
 }
 
 fn handleV1NotifySurface(self: *Server, writer: *client_handler.ResponseWriter, args: []const u8) void {
@@ -621,6 +693,458 @@ fn resolveSurfaceByIndex(ws: *workspace.Workspace, ref: []const u8) ?Uuid {
     const keys = ws.panels.keys();
     if (idx >= keys.len) return null;
     return keys[idx];
+}
+
+// --- V1 workspace / surface / window command handlers ---
+
+fn handleV1NewWorkspace(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter) void {
+    _ = arena;
+    const mgr = self.workspace_manager orelse {
+        v1.err(writer, "No workspace manager") catch {};
+        return;
+    };
+
+    var ctx = SyncCreateCtx{ .mgr = mgr, .cwd = "" };
+    dispatch.syncOnMainThread(&syncCreateWorkspace, @ptrCast(&ctx));
+
+    if (ctx.err) {
+        v1.err(writer, "Failed to create workspace") catch {};
+        return;
+    }
+    const ws_id = ctx.result_id orelse {
+        v1.err(writer, "No workspace ID returned") catch {};
+        return;
+    };
+
+    // Response: "OK <uuid>"
+    var id_buf: [36]u8 = undefined;
+    _ = ws_id.formatBuf(&id_buf);
+    var resp_buf: [40]u8 = undefined;
+    @memcpy(resp_buf[0..3], "OK ");
+    @memcpy(resp_buf[3..39], &id_buf);
+    v1.raw(writer, resp_buf[0..39]) catch {};
+}
+
+fn handleV1ListWorkspaces(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter) void {
+    const mgr = self.workspace_manager orelse {
+        v1.raw(writer, "No workspaces") catch {};
+        return;
+    };
+
+    var ctx = SyncV1ListWorkspacesCtx{ .mgr = mgr, .arena = arena };
+    dispatch.syncOnMainThread(&syncV1ListWorkspaces, @ptrCast(&ctx));
+
+    if (ctx.count == 0) {
+        v1.raw(writer, "No workspaces") catch {};
+        return;
+    }
+
+    // Write each workspace as a line: "<index>:<uuid> <title>"
+    for (0..ctx.count) |i| {
+        const entry = ctx.entries[i];
+        var id_buf: [36]u8 = undefined;
+        _ = entry.id.formatBuf(&id_buf);
+
+        var line_buf: [256]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&line_buf);
+        const w = stream.writer();
+        w.print("{d}:", .{i}) catch continue;
+        w.writeAll(&id_buf) catch continue;
+        w.writeByte(' ') catch continue;
+        w.writeAll(entry.title) catch continue;
+        const written = stream.getWritten();
+
+        if (i > 0) {
+            writer.writeAll("\n") catch {};
+        }
+        writer.writeAll(written) catch {};
+    }
+    writer.writeByte('\n') catch {};
+}
+
+const V1WorkspaceEntry = struct {
+    id: Uuid,
+    title: []const u8,
+};
+
+const SyncV1ListWorkspacesCtx = struct {
+    mgr: *workspace.Manager,
+    arena: Allocator,
+    entries: [128]V1WorkspaceEntry = undefined,
+    count: usize = 0,
+};
+
+fn syncV1ListWorkspaces(data: ?*anyopaque) callconv(.c) c_int {
+    const ctx: *SyncV1ListWorkspacesCtx = @ptrCast(@alignCast(data orelse return 0));
+    const items = ctx.mgr.workspaces.items;
+    const max = @min(items.len, ctx.entries.len);
+    for (items[0..max], 0..) |ws, i| {
+        ctx.entries[i] = .{
+            .id = ws.id,
+            .title = ws.displayTitle(),
+        };
+    }
+    ctx.count = max;
+    return 0;
+}
+
+fn handleV1SelectWorkspace(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    _ = arena;
+    const mgr = self.workspace_manager orelse {
+        v1.err(writer, "No workspace manager") catch {};
+        return;
+    };
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0) {
+        v1.err(writer, "Usage: select_workspace <index_or_id>") catch {};
+        return;
+    }
+
+    // Try as UUID first, then as 0-based index.
+    const ws_id = if (Uuid.parse(trimmed)) |uuid|
+        uuid
+    else |_| blk: {
+        const idx = std.fmt.parseInt(usize, trimmed, 10) catch {
+            v1.err(writer, "Invalid workspace index or UUID") catch {};
+            return;
+        };
+        const ws = mgr.workspaceByIndex(idx) orelse {
+            v1.err(writer, "Workspace index out of range") catch {};
+            return;
+        };
+        break :blk ws.id;
+    };
+
+    var ctx = SyncSelectCtx{ .mgr = mgr, .id = ws_id };
+    dispatch.syncOnMainThread(&syncSelectWorkspace, @ptrCast(&ctx));
+
+    if (!ctx.found) {
+        v1.err(writer, "Workspace not found") catch {};
+        return;
+    }
+    v1.raw(writer, "OK") catch {};
+}
+
+fn handleV1NewWindow(self: *Server, writer: *client_handler.ResponseWriter) void {
+    _ = self;
+    var resp_buf: [8]u8 = undefined;
+    @memcpy(resp_buf[0..7], "OK main");
+    v1.raw(writer, resp_buf[0..7]) catch {};
+}
+
+fn handleV1CurrentWindow(self: *Server, writer: *client_handler.ResponseWriter) void {
+    _ = self;
+    v1.raw(writer, "main") catch {};
+}
+
+fn handleV1ToggleSidebar(self: *Server, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    const win = self.cmux_window orelse {
+        v1.err(writer, "No window") catch {};
+        return;
+    };
+
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    const action: SyncToggleSidebarCtx.Action = if (std.mem.eql(u8, trimmed, "show"))
+        .show
+    else if (std.mem.eql(u8, trimmed, "hide"))
+        .hide
+    else
+        .toggle;
+
+    var ctx = SyncToggleSidebarCtx{ .window = win, .action = action };
+    dispatch.syncOnMainThread(&syncToggleSidebar, @ptrCast(&ctx));
+    v1.raw(writer, "OK") catch {};
+}
+
+const SyncToggleSidebarCtx = struct {
+    window: *anyopaque,
+    action: Action,
+
+    const Action = enum { show, hide, toggle };
+
+    fn callback(data: ?*anyopaque) callconv(.c) c_int {
+        const gtk_mod = @import("gtk");
+        const adw_mod = @import("adw");
+        const gobject_mod = @import("gobject");
+
+        const ctx: *SyncToggleSidebarCtx = @ptrCast(@alignCast(data orelse return 0));
+        const win: *gtk_mod.Widget = @ptrCast(@alignCast(ctx.window));
+        var child = win.getFirstChild();
+        while (child) |c| {
+            if (gobject_mod.ext.cast(adw_mod.OverlaySplitView, c)) |split_view| {
+                switch (ctx.action) {
+                    .show => split_view.setShowSidebar(1),
+                    .hide => split_view.setShowSidebar(0),
+                    .toggle => {
+                        const current = split_view.getShowSidebar();
+                        split_view.setShowSidebar(if (current != 0) 0 else 1);
+                    },
+                }
+                return 0;
+            }
+            child = c.getNextSibling();
+        }
+        return 0;
+    }
+};
+
+fn syncToggleSidebar(data: ?*anyopaque) callconv(.c) c_int {
+    return SyncToggleSidebarCtx.callback(data);
+}
+
+fn handleV1NewSurface(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    _ = args;
+    const ops = self.window_ops orelse {
+        v1.err(writer, "No window ops") catch {};
+        return;
+    };
+    const mgr = self.workspace_manager orelse {
+        v1.err(writer, "No workspace manager") catch {};
+        return;
+    };
+
+    var ws_id_ctx = SyncCurrentCtx{ .mgr = mgr };
+    dispatch.syncOnMainThread(&syncWorkspaceCurrent, @ptrCast(&ws_id_ctx));
+    const ws_id = ws_id_ctx.result_id orelse {
+        v1.err(writer, "No active workspace") catch {};
+        return;
+    };
+
+    var ctx = SyncSplitCtx{
+        .ops = ops,
+        .ws_id = ws_id,
+        .direction = .right,
+    };
+    dispatch.syncOnMainThread(&syncSurfaceSplit, @ptrCast(&ctx));
+
+    const result = ctx.result orelse {
+        v1.err(writer, "Failed to create surface") catch {};
+        return;
+    };
+
+    _ = arena;
+    var id_buf: [36]u8 = undefined;
+    _ = result.surface_id.formatBuf(&id_buf);
+    var resp_buf: [40]u8 = undefined;
+    @memcpy(resp_buf[0..3], "OK ");
+    @memcpy(resp_buf[3..39], &id_buf);
+    v1.raw(writer, resp_buf[0..39]) catch {};
+}
+
+fn handleV1ListSurfaces(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    const ops = self.window_ops orelse {
+        v1.raw(writer, "No surfaces") catch {};
+        return;
+    };
+    const mgr = self.workspace_manager orelse {
+        v1.raw(writer, "No surfaces") catch {};
+        return;
+    };
+
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+
+    const ws_id = if (trimmed.len > 0)
+        Uuid.parse(trimmed) catch {
+            v1.err(writer, "Invalid workspace UUID") catch {};
+            return;
+        }
+    else
+        mgr.selected_id orelse {
+            v1.raw(writer, "No surfaces") catch {};
+            return;
+        };
+
+    var surfaces: window_ops_mod.SurfaceInfoList = .{};
+    var ctx = SyncSurfaceListCtx{ .ops = ops, .ws_id = ws_id, .surfaces = &surfaces, .alloc = arena };
+    dispatch.syncOnMainThread(&syncSurfaceList, @ptrCast(&ctx));
+
+    if (surfaces.items.len == 0) {
+        v1.raw(writer, "No surfaces") catch {};
+        return;
+    }
+
+    for (surfaces.items, 0..) |info, i| {
+        var id_buf: [36]u8 = undefined;
+        _ = info.id.formatBuf(&id_buf);
+
+        if (i > 0) {
+            writer.writeAll("\n") catch {};
+        }
+
+        var line_buf: [64]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&line_buf);
+        const w = stream.writer();
+        w.print("{d}:", .{i}) catch continue;
+        w.writeAll(&id_buf) catch continue;
+        writer.writeAll(stream.getWritten()) catch {};
+    }
+    writer.writeByte('\n') catch {};
+}
+
+fn handleV1ReportPwd(self: *Server, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    const mgr = self.workspace_manager orelse {
+        v1.err(writer, "No workspace manager") catch {};
+        return;
+    };
+
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0) {
+        v1.err(writer, "Usage: report_pwd <path> --tab=<ws_id> --panel=<panel_id>") catch {};
+        return;
+    }
+
+    var path: []const u8 = "";
+    var tab_str: []const u8 = "";
+    var panel_str: []const u8 = "";
+
+    var iter = std.mem.tokenizeScalar(u8, trimmed, ' ');
+    while (iter.next()) |token| {
+        if (std.mem.startsWith(u8, token, "--tab=")) {
+            tab_str = token["--tab=".len..];
+        } else if (std.mem.startsWith(u8, token, "--panel=")) {
+            panel_str = token["--panel=".len..];
+        } else if (path.len == 0) {
+            path = token;
+        }
+    }
+
+    if (path.len == 0) {
+        v1.err(writer, "Missing path argument") catch {};
+        return;
+    }
+
+    const ws_id = if (tab_str.len > 0)
+        Uuid.parse(tab_str) catch {
+            v1.err(writer, "Invalid workspace UUID") catch {};
+            return;
+        }
+    else if (mgr.selected_id) |sel|
+        sel
+    else {
+        v1.err(writer, "No active workspace") catch {};
+        return;
+    };
+
+    const ws = mgr.workspaceById(ws_id) orelse {
+        v1.err(writer, "Workspace not found") catch {};
+        return;
+    };
+
+    if (panel_str.len > 0) {
+        const panel_id = Uuid.parse(panel_str) catch {
+            v1.err(writer, "Invalid panel UUID") catch {};
+            return;
+        };
+        ws.setPanelDirectory(panel_id, path) catch {
+            v1.err(writer, "Failed to update directory") catch {};
+            return;
+        };
+    } else if (ws.focused_panel_id) |fid| {
+        ws.setPanelDirectory(fid, path) catch {
+            v1.err(writer, "Failed to update directory") catch {};
+            return;
+        };
+    }
+
+    v1.raw(writer, "OK") catch {};
+}
+
+fn handleV1FocusWindow(self: *Server, writer: *client_handler.ResponseWriter, args: []const u8) void {
+    _ = args;
+    const win = self.cmux_window orelse {
+        v1.err(writer, "No window") catch {};
+        return;
+    };
+
+    var ctx = SyncPresentWindowCtx{ .window = win };
+    dispatch.syncOnMainThread(&syncPresentWindow, @ptrCast(&ctx));
+    v1.raw(writer, "OK") catch {};
+}
+
+const SyncPresentWindowCtx = struct {
+    window: *anyopaque,
+
+    fn callback(data: ?*anyopaque) callconv(.c) c_int {
+        const gtk_mod = @import("gtk");
+        const ctx: *SyncPresentWindowCtx = @ptrCast(@alignCast(data orelse return 0));
+        const win: *gtk_mod.Window = @ptrCast(@alignCast(ctx.window));
+        win.present();
+        return 0;
+    }
+};
+
+fn syncPresentWindow(data: ?*anyopaque) callconv(.c) c_int {
+    return SyncPresentWindowCtx.callback(data);
+}
+
+fn handleV1ReadTerminalText(self: *Server, arena: Allocator, writer: *client_handler.ResponseWriter) void {
+    const ops = self.window_ops orelse {
+        v1.raw(writer, "") catch {};
+        return;
+    };
+    const mgr = self.workspace_manager orelse {
+        v1.raw(writer, "") catch {};
+        return;
+    };
+
+    var ws_ctx = SyncCurrentCtx{ .mgr = mgr };
+    dispatch.syncOnMainThread(&syncWorkspaceCurrent, @ptrCast(&ws_ctx));
+    const ws_id = ws_ctx.result_id orelse {
+        v1.raw(writer, "") catch {};
+        return;
+    };
+
+    var surf_ctx = SyncSurfaceCurrentCtx{ .ops = ops, .ws_id = ws_id };
+    dispatch.syncOnMainThread(&syncSurfaceCurrent, @ptrCast(&surf_ctx));
+    const surface = surf_ctx.result orelse {
+        v1.raw(writer, "") catch {};
+        return;
+    };
+
+    const text = ops.readScrollback(arena, surface.id) orelse {
+        v1.raw(writer, "") catch {};
+        return;
+    };
+    v1.raw(writer, text) catch {};
+}
+
+// --- V1 flag argument parser ---
+
+const V1FlagArgs = struct {
+    title: []const u8 = "",
+    subtitle: []const u8 = "",
+    body: []const u8 = "",
+    workspace_id: []const u8 = "",
+    surface_id: []const u8 = "",
+};
+
+fn parseV1FlagArgs(args: []const u8) V1FlagArgs {
+    var result = V1FlagArgs{};
+    var iter = std.mem.tokenizeScalar(u8, args, ' ');
+    while (iter.next()) |token| {
+        if (std.mem.eql(u8, token, "--title")) {
+            result.title = iter.next() orelse "";
+        } else if (std.mem.eql(u8, token, "--subtitle")) {
+            result.subtitle = iter.next() orelse "";
+        } else if (std.mem.eql(u8, token, "--body")) {
+            result.body = iter.next() orelse "";
+        } else if (std.mem.eql(u8, token, "--workspace")) {
+            result.workspace_id = iter.next() orelse "";
+        } else if (std.mem.eql(u8, token, "--surface")) {
+            result.surface_id = iter.next() orelse "";
+        } else if (std.mem.startsWith(u8, token, "--title=")) {
+            result.title = token["--title=".len..];
+        } else if (std.mem.startsWith(u8, token, "--subtitle=")) {
+            result.subtitle = token["--subtitle=".len..];
+        } else if (std.mem.startsWith(u8, token, "--body=")) {
+            result.body = token["--body=".len..];
+        } else if (std.mem.startsWith(u8, token, "--workspace=")) {
+            result.workspace_id = token["--workspace=".len..];
+        } else if (std.mem.startsWith(u8, token, "--surface=")) {
+            result.surface_id = token["--surface=".len..];
+        }
+    }
+    return result;
 }
 
 // --- V2 notification.create_for_surface handler ---

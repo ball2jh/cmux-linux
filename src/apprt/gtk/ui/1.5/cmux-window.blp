@@ -10,55 +10,103 @@ template $CmuxWindow: Adw.ApplicationWindow {
   default-height: 700;
   handle-menubar-accel: false;
 
-  // The OverlaySplitView is the root content. The headerbar is placed
-  // inside the content pane (not over the sidebar) to match the Mac
-  // reference where the titlebar overlays content only.
-  content: Adw.OverlaySplitView split_view {
-    show-sidebar: true;
-    min-sidebar-width: 200;
-    max-sidebar-width: 600;
-    sidebar-width-fraction: 0.22;
+  // Horizontal box with sidebar, drag-resizer, and content.
+  // Replaces OverlaySplitView so we can add a user-draggable resize handle.
+  content: Gtk.Box main_hbox {
+    orientation: horizontal;
 
-    sidebar: Gtk.ScrolledWindow {
-      hscrollbar-policy: never;
+    // --- Sidebar container ---
+    Gtk.Box sidebar_box {
+      orientation: vertical;
+      width-request: 200;
 
-      Gtk.Box {
-        orientation: vertical;
+      accessibility {
+        label: "Sidebar";
+      }
 
-        Gtk.ListBox sidebar_list {
-          selection-mode: single;
-          row-selected => $on_row_selected();
-          vexpand: true;
-
-          styles [
-            "navigation-sidebar",
-          ]
-        }
+      Gtk.ScrolledWindow {
+        hscrollbar-policy: never;
+        vexpand: true;
 
         Gtk.Box {
-          orientation: horizontal;
-          halign: start;
-          margin-start: 8;
-          margin-end: 8;
-          margin-top: 4;
-          margin-bottom: 8;
+          orientation: vertical;
 
-          Gtk.Button add_workspace_btn {
-            icon-name: "list-add-symbolic";
-            tooltip-text: "New Workspace";
-            clicked => $on_add_workspace();
-            can-focus: false;
-            focus-on-click: false;
+          Gtk.ListBox sidebar_list {
+            selection-mode: single;
+
+            accessibility {
+              label: "Workspace List";
+            }
+
+            row-selected => $on_row_selected();
+            vexpand: true;
 
             styles [
-              "flat",
+              "navigation-sidebar",
             ]
+          }
+
+          Gtk.Box {
+            orientation: horizontal;
+            halign: fill;
+            margin-start: 8;
+            margin-end: 8;
+            margin-top: 4;
+            margin-bottom: 8;
+
+            Gtk.Button add_workspace_btn {
+              icon-name: "list-add-symbolic";
+              tooltip-text: "New Workspace";
+              clicked => $on_add_workspace();
+              can-focus: false;
+              focus-on-click: false;
+
+              styles [
+                "flat",
+              ]
+            }
+
+            Gtk.Box {
+              hexpand: true;
+            }
+
+            Gtk.Button help_btn {
+              icon-name: "help-about-symbolic";
+              tooltip-text: "Help";
+              clicked => $on_help_clicked();
+              can-focus: false;
+              focus-on-click: false;
+
+              accessibility {
+                label: "SidebarHelpMenuButton";
+              }
+
+              styles [
+                "flat",
+              ]
+            }
           }
         }
       }
-    };
+    }
 
-    content: Adw.ToolbarView toolbar {
+    // --- Draggable resize handle ---
+    Gtk.Separator sidebar_resizer {
+      orientation: vertical;
+
+      accessibility {
+        label: "SidebarResizer";
+      }
+
+      styles [
+        "sidebar-resizer",
+      ]
+    }
+
+    // --- Content area ---
+    Adw.ToolbarView toolbar {
+      hexpand: true;
+
       [top]
       Adw.HeaderBar headerbar {
         show-start-title-buttons: false;
@@ -71,7 +119,7 @@ template $CmuxWindow: Adw.ApplicationWindow {
         Gtk.ToggleButton sidebar_toggle {
           icon-name: "sidebar-show-symbolic";
           tooltip-text: "Toggle Sidebar";
-          active: bind split_view.show-sidebar bidirectional;
+          clicked => $on_sidebar_toggle_clicked();
           can-focus: false;
           focus-on-click: false;
         }

@@ -19,7 +19,16 @@ pub const client_handler = @import("client_handler.zig");
 pub const GhosttyConfig = @import("GhosttyConfig.zig");
 pub const color_utils = @import("color_utils.zig");
 
+// UI test observability harness.
+pub const ui_test_harness = @import("ui_test_harness.zig");
+pub const render_diagnostics = @import("render_diagnostics.zig");
+
+// Terminal image transfer.
+pub const image_transfer = @import("image_transfer.zig");
+pub const url_resolve = @import("url_resolve.zig");
+
 // Utilities.
+pub const sidebar_drop_planner = @import("sidebar_drop_planner.zig");
 pub const sidebar_path = @import("sidebar_path.zig");
 pub const password_store = @import("password_store.zig");
 pub const command_palette_search = @import("command_palette_search.zig");

@@ -4,6 +4,7 @@
 //! and a stacked content area showing terminal surfaces.
 
 const std = @import("std");
+const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
@@ -24,6 +25,10 @@ pub fn newCmuxWindow(
 ) !void {
     _ = parent;
     _ = overrides;
+
+    // Set application name for AT-SPI accessibility (used by dogtail/accerciser).
+    glib.setPrgname("cmux");
+    glib.setApplicationName("cmux");
 
     const win = CmuxWindow.new(app);
 

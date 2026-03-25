@@ -18,6 +18,12 @@ const client_handler = cmux.client_handler;
 const Server = cmux.Server;
 const Uuid = cmux.Uuid;
 
+/// POSIX C environment functions for debug.set_env.
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
 const log = std.log.scoped(.cmux_debug);
 
 /// Dispatch a debug.* V2 method. Called from Server.dispatchV2.
@@ -114,6 +120,12 @@ pub fn dispatch(
         debugBrowserAddressBarFocused(server, arena, writer, req);
     } else if (std.mem.eql(u8, req.method, "debug.browser.favicon")) {
         debugBrowserFavicon(server, arena, writer, req);
+    } else if (std.mem.eql(u8, req.method, "debug.seed_browser_history")) {
+        debugSeedBrowserHistory(server, arena, writer, req);
+
+        // --- Environment ---
+    } else if (std.mem.eql(u8, req.method, "debug.set_env")) {
+        debugSetEnv(server, arena, writer, req);
     } else {
         v2.writeError(writer, arena, req.id, v2.ErrorCode.method_not_found, "Unknown method") catch {};
     }
@@ -150,6 +162,8 @@ pub const debug_only_method_names = [_][]const u8{
     "debug.panel_snapshot",
     "debug.panel_snapshot.reset",
     "debug.portal.stats",
+    "debug.seed_browser_history",
+    "debug.set_env",
     "debug.shortcut.set",
     "debug.shortcut.simulate",
     "debug.sidebar.visible",
@@ -575,15 +589,45 @@ fn debugNotificationFocus(
 
 // --- Command palette commands --------------------------------------------
 
+const CmuxWindow = @import("../gtk/window.zig").CmuxWindow;
+const CommandPaletteMod = @import("../gtk/command_palette.zig");
+const PaletteType = CommandPaletteMod.CommandPalette;
+
 fn debugCommandPaletteToggle(
     server: *Server,
     arena: Allocator,
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → CommandPalette.toggle()
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const mode_str = jsonStr(req.params.get("mode"));
+
+    const PaletteToggleCtx = struct {
+        window: *anyopaque,
+        mode_str: []const u8,
+
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            const mode: CommandPaletteMod.PaletteMode = if (std.mem.eql(u8, ctx.mode_str, "switcher"))
+                .switcher
+            else if (std.mem.eql(u8, ctx.mode_str, "rename"))
+                .rename
+            else
+                .commands;
+            palette.toggle(mode);
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+
+    var ctx = PaletteToggleCtx{ .window = win, .mode_str = mode_str };
+    cmux.dispatch.syncOnMainThread(&PaletteToggleCtx.callback, @ptrCast(&ctx));
+    writeEmptyOk(writer, arena, req.id);
 }
 
 fn debugCommandPaletteRenameTabOpen(
@@ -592,9 +636,24 @@ fn debugCommandPaletteRenameTabOpen(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → CommandPalette.toggleWithScope(.rename)
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const PaletteRenameCtx = struct {
+        window: *anyopaque,
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            palette.show(.rename);
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = PaletteRenameCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&PaletteRenameCtx.callback, @ptrCast(&ctx));
+    writeEmptyOk(writer, arena, req.id);
 }
 
 fn debugCommandPaletteVisible(
@@ -603,9 +662,28 @@ fn debugCommandPaletteVisible(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → check CommandPalette dialog realized state
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const PaletteVisibleCtx = struct {
+        window: *anyopaque,
+        visible: bool = false,
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            ctx.visible = palette.isVisible();
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = PaletteVisibleCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&PaletteVisibleCtx.callback, @ptrCast(&ctx));
+
+    var result = json.ObjectMap.init(arena);
+    result.put("visible", .{ .bool = ctx.visible }) catch {};
+    v2.writeOk(writer, arena, req.id, .{ .object = result }) catch {};
 }
 
 fn debugCommandPaletteSelection(
@@ -614,9 +692,31 @@ fn debugCommandPaletteSelection(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → read CommandPalette model selected index
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const PaletteSelCtx = struct {
+        window: *anyopaque,
+        visible: bool = false,
+        selected_index: i32 = 0,
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            ctx.visible = palette.isVisible();
+            ctx.selected_index = palette.getSelectedIndex();
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = PaletteSelCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&PaletteSelCtx.callback, @ptrCast(&ctx));
+
+    var result = json.ObjectMap.init(arena);
+    result.put("visible", .{ .bool = ctx.visible }) catch {};
+    result.put("selected_index", .{ .integer = @intCast(@max(0, ctx.selected_index)) }) catch {};
+    v2.writeOk(writer, arena, req.id, .{ .object = result }) catch {};
 }
 
 fn debugCommandPaletteResults(
@@ -625,9 +725,52 @@ fn debugCommandPaletteResults(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → read filtered results from CommandPalette
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const PaletteResultsCtx = struct {
+        window: *anyopaque,
+        alloc: Allocator,
+        visible: bool = false,
+        selected_index: i32 = 0,
+        query: []const u8 = "",
+        mode: []const u8 = "commands",
+        rows: json.Array = undefined,
+
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            ctx.visible = palette.isVisible();
+            ctx.selected_index = palette.getSelectedIndex();
+            ctx.query = palette.getQuery();
+            ctx.mode = palette.getMode().toString();
+
+            ctx.rows = json.Array.init(ctx.alloc);
+            const results = palette.getResults();
+            for (results) |r| {
+                var row = json.ObjectMap.init(ctx.alloc);
+                row.put("command_id", .{ .string = r.command_id }) catch continue;
+                row.put("title", .{ .string = r.title }) catch continue;
+                row.put("trailing_label", if (r.trailing_label.len > 0) json.Value{ .string = r.trailing_label } else .null) catch continue;
+                row.put("score", .{ .integer = @intCast(r.score) }) catch continue;
+                ctx.rows.append(.{ .object = row }) catch continue;
+            }
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = PaletteResultsCtx{ .window = win, .alloc = arena, .rows = json.Array.init(arena) };
+    cmux.dispatch.syncOnMainThread(&PaletteResultsCtx.callback, @ptrCast(&ctx));
+
+    var result = json.ObjectMap.init(arena);
+    result.put("visible", .{ .bool = ctx.visible }) catch {};
+    result.put("selected_index", .{ .integer = @intCast(@max(0, ctx.selected_index)) }) catch {};
+    result.put("query", .{ .string = ctx.query }) catch {};
+    result.put("mode", .{ .string = ctx.mode }) catch {};
+    result.put("results", .{ .array = ctx.rows }) catch {};
+    v2.writeOk(writer, arena, req.id, .{ .object = result }) catch {};
 }
 
 fn debugCommandPaletteRenameInputInteract(
@@ -637,8 +780,7 @@ fn debugCommandPaletteRenameInputInteract(
     req: v2.Request,
 ) void {
     _ = server;
-    // TODO: Implement via syncOnMainThread → focus rename input
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    writeEmptyOk(writer, arena, req.id);
 }
 
 fn debugCommandPaletteRenameInputDeleteBackward(
@@ -647,9 +789,26 @@ fn debugCommandPaletteRenameInputDeleteBackward(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → delete backward in rename input
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const RenameDeleteCtx = struct {
+        window: *anyopaque,
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const gtk_mod = @import("gtk");
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            const entry = palette.getRenameEntry() orelse return 0;
+            gtk_mod.Editable.deleteText(entry.as(gtk_mod.Editable), -1, 0);
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = RenameDeleteCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&RenameDeleteCtx.callback, @ptrCast(&ctx));
+    writeEmptyOk(writer, arena, req.id);
 }
 
 fn debugCommandPaletteRenameInputSelection(
@@ -658,9 +817,37 @@ fn debugCommandPaletteRenameInputSelection(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → query rename input selection state
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const RenameSelCtx = struct {
+        window: *anyopaque,
+        text: []const u8 = "",
+        selection_start: c_int = 0,
+        selection_end: c_int = 0,
+
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const gtk_mod = @import("gtk");
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            const entry = palette.getRenameEntry() orelse return 0;
+            const buffer = entry.getBuffer();
+            ctx.text = std.mem.span(buffer.getText());
+            _ = gtk_mod.Editable.getSelectionBounds(entry.as(gtk_mod.Editable), &ctx.selection_start, &ctx.selection_end);
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = RenameSelCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&RenameSelCtx.callback, @ptrCast(&ctx));
+
+    var result = json.ObjectMap.init(arena);
+    result.put("text", .{ .string = ctx.text }) catch {};
+    result.put("selection_start", .{ .integer = @intCast(ctx.selection_start) }) catch {};
+    result.put("selection_end", .{ .integer = @intCast(ctx.selection_end) }) catch {};
+    v2.writeOk(writer, arena, req.id, .{ .object = result }) catch {};
 }
 
 fn debugCommandPaletteRenameInputSelectAll(
@@ -669,10 +856,28 @@ fn debugCommandPaletteRenameInputSelectAll(
     writer: *client_handler.ResponseWriter,
     req: v2.Request,
 ) void {
-    _ = server;
-    // TODO: Implement via syncOnMainThread → get/set select-all-on-focus preference
-    v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented") catch {};
+    const RenameSelectAllCtx = struct {
+        window: *anyopaque,
+        fn callback(data: ?*anyopaque) callconv(.c) c_int {
+            const gtk_mod = @import("gtk");
+            const ctx: *@This() = @ptrCast(@alignCast(data orelse return 0));
+            const win: *CmuxWindow = @ptrCast(@alignCast(ctx.window));
+            const palette = win.getCommandPalette() orelse return 0;
+            const entry = palette.getRenameEntry() orelse return 0;
+            gtk_mod.Editable.selectRegion(entry.as(gtk_mod.Editable), 0, -1);
+            return 0;
+        }
+    };
+
+    const win = server.cmux_window orelse {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "No window") catch {};
+        return;
+    };
+    var ctx = RenameSelectAllCtx{ .window = win };
+    cmux.dispatch.syncOnMainThread(&RenameSelectAllCtx.callback, @ptrCast(&ctx));
+    writeEmptyOk(writer, arena, req.id);
 }
+
 
 // --- Counter commands ----------------------------------------------------
 
@@ -818,6 +1023,123 @@ fn debugBrowserFavicon(
     _ = server;
     // TODO: Implement via syncOnMainThread → WebKitGTK favicon retrieval.
     v2.writeError(writer, arena, req.id, v2.ErrorCode.internal_error, "Not yet implemented — requires WebKitGTK favicon API") catch {};
+}
+
+// --- debug.set_env -------------------------------------------------------
+
+/// Set an environment variable at runtime.
+/// Matches macOS v2DebugSetEnv -- used by UI tests to configure the import
+/// wizard fixture and capture settings after launch.
+///
+/// Params: { "name": "<VAR>", "value": "<VALUE>" }
+/// Pass an empty value or omit it to unset the variable.
+fn debugSetEnv(
+    server: *Server,
+    arena: Allocator,
+    writer: *client_handler.ResponseWriter,
+    req: v2.Request,
+) void {
+    _ = server;
+
+    const name = jsonStr(req.params.get("name"));
+    if (name.len == 0) {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.invalid_params, "Missing name") catch {};
+        return;
+    }
+
+    const value = jsonStr(req.params.get("value"));
+
+    // We need null-terminated strings for the C setenv/unsetenv calls.
+    var name_buf: [512:0]u8 = undefined;
+    if (name.len >= name_buf.len) {
+        v2.writeError(writer, arena, req.id, v2.ErrorCode.invalid_params, "Name too long") catch {};
+        return;
+    }
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    const name_z: [*:0]const u8 = @ptrCast(&name_buf);
+
+    if (value.len == 0) {
+        // Unset.
+        _ = c_env.unsetenv(name_z);
+    } else {
+        var val_buf: [4096:0]u8 = undefined;
+        if (value.len >= val_buf.len) {
+            v2.writeError(writer, arena, req.id, v2.ErrorCode.invalid_params, "Value too long") catch {};
+            return;
+        }
+        @memcpy(val_buf[0..value.len], value);
+        val_buf[value.len] = 0;
+        const val_z: [*:0]const u8 = @ptrCast(&val_buf);
+        _ = c_env.setenv(name_z, val_z, 1);
+    }
+
+    writeEmptyOk(writer, arena, req.id);
+}
+
+// --- debug.seed_browser_history ------------------------------------------
+
+/// Seed the browser history store with test entries.
+/// Params: { "entries": [{ "url": "...", "title": "...", "visitCount": N, "typedCount": N }] }
+fn debugSeedBrowserHistory(
+    server: *Server,
+    arena: Allocator,
+    writer: *client_handler.ResponseWriter,
+    req: v2.Request,
+) void {
+    _ = server;
+
+    const BrowserPanelView = @import("../gtk/browser_panel_view.zig");
+
+    // Clear existing history
+    BrowserPanelView.shared_history_store.clear();
+
+    // Parse entries array from params
+    const entries_val = req.params.get("entries") orelse {
+        writeEmptyOk(writer, arena, req.id);
+        return;
+    };
+
+    const entries = switch (entries_val) {
+        .array => |arr| arr.items,
+        else => {
+            v2.writeError(writer, arena, req.id, v2.ErrorCode.invalid_params, "entries must be an array") catch {};
+            return;
+        },
+    };
+
+    for (entries) |entry_val| {
+        const entry_obj = switch (entry_val) {
+            .object => |obj| obj,
+            else => continue,
+        };
+
+        const url_str = jsonStr(entry_obj.get("url"));
+        if (url_str.len == 0) continue;
+
+        const title_str = jsonStr(entry_obj.get("title"));
+        const title_opt: ?[]const u8 = if (title_str.len > 0) title_str else null;
+
+        var visit_count: u32 = 1;
+        if (entry_obj.get("visitCount")) |vc| {
+            visit_count = switch (vc) {
+                .integer => |i| @intCast(@max(0, i)),
+                else => 1,
+            };
+        }
+
+        var typed_count: u32 = 0;
+        if (entry_obj.get("typedCount")) |tc| {
+            typed_count = switch (tc) {
+                .integer => |i| @intCast(@max(0, i)),
+                else => 0,
+            };
+        }
+
+        BrowserPanelView.shared_history_store.addEntry(url_str, title_opt, visit_count, typed_count);
+    }
+
+    writeEmptyOk(writer, arena, req.id);
 }
 
 // =========================================================================

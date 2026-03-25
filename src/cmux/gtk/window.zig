@@ -20,8 +20,16 @@ const Application = @import("../../apprt/gtk/class/application.zig").Application
 const SplitTree = @import("../../apprt/gtk/class/split_tree.zig").SplitTree;
 const Surface = @import("../../apprt/gtk/class/surface.zig").Surface;
 
+const gdk = @import("gdk");
+
+const BrowserPanelView = @import("browser_panel_view.zig").BrowserPanelView;
+const drop_planner = @import("../sidebar_drop_planner.zig");
 const cmux = @import("../main.zig");
 const bridge = @import("bridge.zig");
+const CommandPalette = @import("command_palette.zig").CommandPalette;
+const command_palette_mod = @import("command_palette.zig");
+const image_transfer = @import("../image_transfer.zig");
+const SshSessionDetector = @import("../remote/SshSessionDetector.zig");
 
 const log = std.log.scoped(.cmux_window);
 
@@ -54,11 +62,37 @@ pub const CmuxWindow = extern struct {
 
     const Private = struct {
         // Template children
-        split_view: *adw.OverlaySplitView = undefined,
+        sidebar_box: *gtk.Box = undefined,
+        sidebar_resizer: *gtk.Separator = undefined,
         sidebar_list: *gtk.ListBox = undefined,
         workspace_stack: *gtk.Stack = undefined,
         window_title: *adw.WindowTitle = undefined,
         toast_overlay: *adw.ToastOverlay = undefined,
+        sidebar_toggle: *gtk.ToggleButton = undefined,
+        help_btn: *gtk.Button = undefined,
+
+        // Help menu / feedback composer (built programmatically)
+        help_popover: ?*gtk.Popover = null,
+        feedback_overlay: ?*gtk.Widget = null,
+        shortcuts_overlay: ?*gtk.Widget = null,
+
+        // Sidebar resize state
+        sidebar_width: f64 = cmux.persistence.policy.default_sidebar_width,
+        sidebar_visible: bool = true,
+        drag_start_width: ?f64 = null,
+
+        // Programmatic widgets (not in BLP template)
+        pane_tab_bar: ?*gtk.Box = null,
+        titlebar_controls: ?*gtk.Box = null,
+        toggle_sidebar_btn: ?*gtk.Button = null,
+        notifications_btn: ?*gtk.Button = null,
+        new_tab_btn: ?*gtk.Button = null,
+        new_terminal_btn: ?*gtk.Button = null,
+
+        // Pane tab bar drag state
+        tab_dragged_panel_id: ?cmux.Uuid = null,
+        tab_drop_indicator: ?drop_planner.DropIndicator = null,
+        tab_drop_indicator_widget: ?*gtk.Widget = null,
 
         // Configuration
         config: ?*Config = null,
@@ -78,10 +112,16 @@ pub const CmuxWindow = extern struct {
         surface_map: std.AutoArrayHashMapUnmanaged(cmux.Uuid, *Surface) = .{},
         surface_reverse: std.AutoArrayHashMapUnmanaged(usize, cmux.Uuid) = .{},
 
+        // Command palette widget
+        command_palette: ?*CommandPalette = null,
+
         // Session persistence state
         autosave_source_id: c_uint = 0,
         last_autosave_fingerprint: ?u64 = null,
         last_autosave_time: i64 = 0,
+
+        // Render diagnostics for UI tests (heap-allocated when enabled).
+        render_diag: ?*cmux.render_diagnostics.RenderDiagnostics = null,
 
         pub var offset: c_int = 0;
     };
@@ -100,6 +140,9 @@ pub const CmuxWindow = extern struct {
 
         const priv = self.private();
         const alloc = app.allocator();
+
+        // Initialise the UI test harness (reads env vars; no-op in non-test runs).
+        cmux.ui_test_harness.init();
 
         // Wire dispatch to real GLib functions
         cmux.dispatch.idle_add_fn = &glibIdleAdd;
@@ -132,18 +175,22 @@ pub const CmuxWindow = extern struct {
         priv.bridge_ctx = bridge_ctx;
         manager.setOnChange(&bridge.onManagerChange, @ptrCast(bridge_ctx));
 
-        // Start the socket server
-        var path_buf: [std.posix.PATH_MAX]u8 = undefined;
-        if (cmux.socket_path.defaultPath(&path_buf)) |path| {
-            cmux.socket_path.ensureParentDir(path) catch |err| {
-                log.warn("failed to ensure socket parent dir: {}", .{err});
-            };
-            server.start(path, .allow_all) catch |err| {
-                log.warn("failed to start socket server: {}", .{err});
-            };
-            cmux.socket_path.recordLastPath(path);
-        } else |err| {
-            log.warn("failed to resolve socket path: {}", .{err});
+        // Start the socket server (unless UI test mode disables it).
+        if (cmux.ui_test_harness.shouldCreateSocket()) {
+            var path_buf: [std.posix.PATH_MAX]u8 = undefined;
+            if (cmux.socket_path.defaultPath(&path_buf)) |path| {
+                cmux.socket_path.ensureParentDir(path) catch |err| {
+                    log.warn("failed to ensure socket parent dir: {}", .{err});
+                };
+                server.start(path, .allow_all) catch |err| {
+                    log.warn("failed to start socket server: {}", .{err});
+                };
+                cmux.socket_path.recordLastPath(path);
+            } else |err| {
+                log.warn("failed to resolve socket path: {}", .{err});
+            }
+        } else {
+            log.info("socket server disabled by CMUX_SOCKET_CONTROL_MODE=off", .{});
         }
 
         // Load Ghostty appearance config
@@ -164,6 +211,13 @@ pub const CmuxWindow = extern struct {
         } else |err| {
             log.warn("failed to load ghostty config: {}", .{err});
         }
+
+        // Build the programmatic pane tab bar and titlebar controls.
+        self.buildPaneTabBar();
+        self.buildTitlebarControls();
+
+        // Set up the sidebar resizer drag handle.
+        self.setupSidebarResizer();
 
         // Attempt session restore
         var did_restore = false;
@@ -189,8 +243,14 @@ pub const CmuxWindow = extern struct {
             };
         }
 
+        // Create command palette overlay
+        self.setupCommandPalette(manager);
+
         // Start autosave timer
         self.startAutosaveTimer();
+
+        // Start render diagnostics for UI tests (no-op when not enabled).
+        self.startRenderDiagnostics(alloc);
 
         return self;
     }
@@ -303,8 +363,40 @@ pub const CmuxWindow = extern struct {
             .init("clear", actionClear, null),
             // Map Ghostty's "new-tab" to new workspace for compat
             .init("new-tab", actionNewWorkspace, null),
+            .init("send-feedback", actionSendFeedback, null),
+            .init("focus-address-bar", actionFocusAddressBar, null),
+            .init("toggle-sidebar", actionToggleSidebar, null),
+            .init("close-panel", actionClosePanel, null),
+            .init("close-window", actionCloseWindow, null),
+            .init("confirm-close", actionConfirmClose, null),
+            .init("toggle-notifications", actionToggleNotifications, null),
+            .init("jump-to-unread", actionJumpToUnread, null),
+            .init("open-feedback", actionOpenFeedback, null),
+            .init("open-settings", actionOpenSettings, null),
+            .init("command-palette-commands", actionCommandPaletteCommands, null),
+            .init("command-palette-switcher", actionCommandPaletteSwitcher, null),
+            .init("rename", actionRename, null),
+            .init("rename-tab", actionRename, null),
+            .init("rename-workspace", actionRenameWorkspace, null),
+            .init("find", actionFind, null),
+            .init("goto-split-left", actionGotoSplitLeft, null),
+            .init("goto-split-down", actionGotoSplitDown, null),
+            .init("goto-split-up", actionGotoSplitUp, null),
+            .init("goto-split-right", actionGotoSplitRight, null),
+            .init("pane-switch-left", actionPaneSwitchLeft, null),
+            .init("pane-switch-right", actionPaneSwitchRight, null),
+            .init("open-browser-in-pane", actionOpenBrowserInPane, null),
+            .init("zoom-toggle", actionZoomToggle, null),
+            .init("next-surface", actionNextSurface, null),
+            .init("prev-surface", actionPrevSurface, null),
+            .init("trigger-flash", actionTriggerFlash, null),
         };
         ext.actions.add(Self, self, &actions);
+
+        // Register all keyboard accelerators via shortcut settings
+        const app = self.as(gtk.Window).getApplication() orelse return;
+        const shortcuts_mod = @import("shortcuts.zig");
+        shortcuts_mod.syncAccelerators(app);
     }
 
     fn actionClose(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
@@ -314,16 +406,35 @@ pub const CmuxWindow = extern struct {
     fn actionNewWorkspace(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const priv = self.private();
         const manager = priv.manager orelse return;
-        _ = manager.createWorkspace(.{ .title = "Terminal" }) catch |err| {
+        const ws = manager.createWorkspace(.{ .title = "Terminal" }) catch |err| {
             log.err("failed to create workspace: {}", .{err});
+            return;
         };
+
+        // UI test harness: record the invocation and current workspace count.
+        const harness = cmux.ui_test_harness;
+        harness.incrementKeyequiv("addTabInvocations");
+        var count_buf: [20]u8 = undefined;
+        const count_str = std.fmt.bufPrint(&count_buf, "{d}", .{manager.workspaceCount()}) catch "?";
+        var id_buf: [36]u8 = undefined;
+        const id_str = ws.id.formatBuf(&id_buf);
+        harness.recordKeyequiv(&.{
+            .{ .key = "tabCount", .value = count_str },
+            .{ .key = "selectedTabId", .value = id_str },
+        });
     }
 
     fn actionCloseWorkspace(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        cmux.ui_test_harness.incrementKeyequiv("closeTabInvocations");
         const priv = self.private();
         const manager = priv.manager orelse return;
         const selected = manager.selected_id orelse return;
         manager.closeWorkspace(selected) catch {};
+    }
+
+    fn actionClosePanel(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        cmux.ui_test_harness.incrementKeyequiv("closePanelInvocations");
+        self.performBindingAction(.close_surface);
     }
 
     fn actionSplitRight(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
@@ -356,6 +467,194 @@ pub const CmuxWindow = extern struct {
 
     fn actionClear(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         self.performBindingAction(.clear_screen);
+    }
+
+    fn actionFocusAddressBar(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        // Find the first visible browser panel and focus its omnibar.
+        const priv = self.private();
+        var iter = priv.browser_panel_map.iterator();
+        while (iter.next()) |entry| {
+            const panel: *BrowserPanelView = entry.value_ptr.*;
+            if (panel.as(gtk.Widget).isVisible() != 0) {
+                panel.focusOmnibar();
+                return;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Command palette
+    // -----------------------------------------------------------------
+
+    fn setupCommandPalette(self: *Self, manager: *cmux.workspace.Manager) void {
+        const priv = self.private();
+
+        CommandPalette.loadCss();
+
+        const palette = CommandPalette.new();
+        priv.command_palette = palette;
+
+        palette.setWorkspaceManager(manager);
+        palette.setExecutionCallback(.{
+            .ctx = @ptrCast(self),
+            .executeFn = &onPaletteCommandExecuted,
+        });
+
+        // Add the palette as an overlay on the toast_overlay widget
+        const overlay = gtk.Overlay.new();
+        overlay.setChild(priv.toast_overlay.as(gtk.Widget));
+        overlay.addOverlay(palette.as(gtk.Widget));
+
+        // Replace the toast_overlay in the toolbar view with our overlay
+        const toolbar_view = priv.toast_overlay.as(gtk.Widget).getParent();
+        if (toolbar_view) |tv| {
+            if (gobject.ext.cast(adw.ToolbarView, tv)) |tbv| {
+                tbv.setContent(overlay.as(gtk.Widget));
+            }
+        }
+
+        // Install keyboard shortcuts via window-level key controller
+        const key_ctrl = gtk.EventControllerKey.new();
+        _ = gtk.EventControllerKey.signals.key_pressed.connect(
+            key_ctrl,
+            *Self,
+            onWindowKeyPressed,
+            self,
+            .{},
+        );
+        self.as(gtk.Widget).addController(key_ctrl.as(gtk.EventController));
+    }
+
+    fn onWindowKeyPressed(
+        _: *gtk.EventControllerKey,
+        keyval: c_uint,
+        _: c_uint,
+        state: gdk.ModifierType,
+        self: *Self,
+    ) callconv(.c) c_int {
+        const priv = self.private();
+        const palette = priv.command_palette orelse return 0;
+
+        const ctrl = state.control_mask;
+        const shift = state.shift_mask;
+
+        if (ctrl and shift and (keyval == gdk.KEY_p or keyval == gdk.KEY_P)) {
+            palette.toggle(.commands);
+            return 1;
+        }
+        if (ctrl and !shift and (keyval == gdk.KEY_p or keyval == gdk.KEY_P)) {
+            palette.toggle(.switcher);
+            return 1;
+        }
+        if (ctrl and !shift and (keyval == gdk.KEY_r or keyval == gdk.KEY_R)) {
+            palette.toggle(.rename);
+            return 1;
+        }
+
+        return 0;
+    }
+
+    fn onPaletteCommandExecuted(ctx: ?*anyopaque, command_id: []const u8) void {
+        const self_p: *Self = @ptrCast(@alignCast(ctx orelse return));
+        const priv = self_p.private();
+        const manager = priv.manager orelse return;
+
+        if (std.mem.eql(u8, command_id, "palette.closeOtherWorkspaces")) {
+            self_p.closeOtherWorkspaces();
+        } else if (std.mem.eql(u8, command_id, "palette.enableMinimalMode")) {
+            log.info("enable minimal mode requested (not yet implemented)", .{});
+        } else if (std.mem.eql(u8, command_id, "palette.disableMinimalMode")) {
+            log.info("disable minimal mode requested (not yet implemented)", .{});
+        } else if (std.mem.startsWith(u8, command_id, "switcher.workspace.")) {
+            const uuid_str = command_id["switcher.workspace.".len..];
+            const uuid = cmux.Uuid.parse(uuid_str) catch return;
+            manager.selectWorkspace(uuid);
+        }
+    }
+
+    fn closeOtherWorkspaces(self: *Self) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const selected_id = manager.selected_id orelse return;
+
+        var to_close_buf: [256]cmux.Uuid = undefined;
+        var to_close_count: usize = 0;
+        for (manager.workspaces.items) |ws| {
+            if (!ws.id.eql(selected_id)) {
+                if (to_close_count < to_close_buf.len) {
+                    to_close_buf[to_close_count] = ws.id;
+                    to_close_count += 1;
+                }
+            }
+        }
+        if (to_close_count == 0) return;
+        self.showCloseWorkspacesDialog(to_close_buf[0..to_close_count]);
+    }
+
+    fn showCloseWorkspacesDialog(self: *Self, workspace_ids: []const cmux.Uuid) void {
+        const priv = self.private();
+        const alloc = Application.default().allocator();
+
+        const dialog = adw.AlertDialog.new("Close workspaces?", null);
+
+        var body_buf: [256:0]u8 = undefined;
+        const body = std.fmt.bufPrint(&body_buf, "This will close {d} workspace(s).", .{workspace_ids.len}) catch "Close workspaces?";
+        body_buf[@min(body.len, body_buf.len - 1)] = 0;
+        dialog.setBody(@ptrCast(body_buf[0..body.len :0].ptr));
+
+        _ = dialog.addResponse("cancel", "Cancel");
+        _ = dialog.addResponse("close", "Close");
+        dialog.setResponseAppearance("close", .destructive);
+
+        const ids_copy = alloc.dupe(cmux.Uuid, workspace_ids) catch return;
+        priv.active_close_dialog = dialog;
+        priv.active_close_dialog_on_confirm = .{ .close_workspaces = ids_copy };
+
+        _ = adw.AlertDialog.signals.response.connect(dialog, *Self, onCloseDialogResponse, self, .{});
+        dialog.as(adw.Dialog).present(self.as(gtk.Widget));
+    }
+
+    fn onCloseDialogResponse(
+        _: *adw.AlertDialog,
+        response: [*:0]const u8,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        const alloc = Application.default().allocator();
+
+        defer {
+            priv.active_close_dialog = null;
+            if (priv.active_close_dialog_on_confirm) |action| {
+                switch (action) {
+                    .close_workspaces => |ids| alloc.free(ids),
+                    else => {},
+                }
+            }
+            priv.active_close_dialog_on_confirm = null;
+        }
+
+        const resp = std.mem.span(response);
+        if (!std.mem.eql(u8, resp, "close")) return;
+
+        const manager = priv.manager orelse return;
+        const action = priv.active_close_dialog_on_confirm orelse return;
+        switch (action) {
+            .close_window => self.as(gtk.Window).close(),
+            .close_workspace => |id| manager.closeWorkspace(id) catch {},
+            .close_workspaces => |ids| {
+                for (ids) |id| manager.closeWorkspace(id) catch {};
+            },
+        }
+    }
+
+    /// Get the command palette widget.
+    pub fn getCommandPalette(self: *Self) ?*CommandPalette {
+        return self.private().command_palette;
+    }
+
+    /// Get the workspace manager.
+    pub fn getWorkspaceManager(self: *Self) ?*cmux.workspace.Manager {
+        return self.private().manager;
     }
 
     // -----------------------------------------------------------------
@@ -491,6 +790,9 @@ pub const CmuxWindow = extern struct {
 
         // Track the new workspace's active surface title
         self.trackActiveSurfaceTitle();
+
+        // Rebuild pane tab bar for the newly selected workspace
+        self.rebuildPaneTabBar();
 
         // Focus the active surface in the newly selected workspace
         if (self.getActiveSurface()) |surface| {
@@ -876,6 +1178,46 @@ pub const CmuxWindow = extern struct {
     }
 
     // -----------------------------------------------------------------
+    // Render diagnostics (UI tests)
+    // -----------------------------------------------------------------
+
+    fn startRenderDiagnostics(self: *Self, alloc: Allocator) void {
+        if (!cmux.render_diagnostics.RenderDiagnostics.shouldEnable()) return;
+
+        const priv = self.private();
+        const diag = alloc.create(cmux.render_diagnostics.RenderDiagnostics) catch {
+            log.warn("failed to allocate render diagnostics", .{});
+            return;
+        };
+        diag.* = .{};
+        diag.window_ptr = @ptrCast(self);
+        diag.get_panel_id_fn = &renderDiagGetPanelId;
+        diag.get_window_visible_fn = &renderDiagGetWindowVisible;
+        priv.render_diag = diag;
+
+        diag.start(priv.workspace_stack.as(gtk.Widget));
+    }
+
+    fn stopRenderDiagnostics(self: *Self) void {
+        const priv = self.private();
+        if (priv.render_diag) |diag| {
+            diag.stop();
+        }
+    }
+
+    fn renderDiagGetPanelId(window_ptr: ?*anyopaque) ?[36]u8 {
+        const self: *Self = @ptrCast(@alignCast(window_ptr orelse return null));
+        const surface = self.getActiveSurface() orelse return null;
+        const uuid = self.surfaceUuid(surface) orelse return null;
+        return uuid.format();
+    }
+
+    fn renderDiagGetWindowVisible(window_ptr: ?*anyopaque) bool {
+        const self: *Self = @ptrCast(@alignCast(window_ptr orelse return false));
+        return self.as(gtk.Widget).getVisible() != 0;
+    }
+
+    // -----------------------------------------------------------------
     // Session persistence — autosave
     // -----------------------------------------------------------------
 
@@ -963,6 +1305,9 @@ pub const CmuxWindow = extern struct {
     // -----------------------------------------------------------------
 
     fn dispose(self: *Self) callconv(.c) void {
+        // Stop render diagnostics before teardown (removes tick callback).
+        self.stopRenderDiagnostics();
+
         // Save session synchronously before teardown
         self.stopAutosaveTimer();
         self.runAutosave(true);
@@ -1013,6 +1358,11 @@ pub const CmuxWindow = extern struct {
             priv.bridge_ctx = null;
         }
 
+        if (priv.render_diag) |diag| {
+            alloc.destroy(diag);
+            priv.render_diag = null;
+        }
+
         priv.surface_map.deinit(alloc);
         priv.surface_reverse.deinit(alloc);
 
@@ -1052,9 +1402,11 @@ pub const CmuxWindow = extern struct {
             class.bindTemplateChildPrivate("workspace_stack", .{});
             class.bindTemplateChildPrivate("window_title", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
+            class.bindTemplateChildPrivate("help_btn", .{});
 
             class.bindTemplateCallback("on_add_workspace", &onAddWorkspace);
             class.bindTemplateCallback("on_row_selected", &onRowSelected);
+            class.bindTemplateCallback("on_help_clicked", &onHelpClicked);
 
             gobject.ext.registerProperties(class, &.{
                 properties.config.impl,

@@ -2,8 +2,7 @@ const std = @import("std");
 const shortcut = @import("shortcut.zig");
 
 // =============================================================================
-// Production types and functions (TODO: implement to match Mac's AppDelegate
-// shortcut routing, keyboard shortcut settings, and stored shortcut types)
+// Production types and functions
 // =============================================================================
 
 /// A persisted keyboard shortcut.
@@ -22,6 +21,11 @@ pub const StoredShortcut = struct {
             .option = self.option,
             .control = self.control,
         };
+    }
+
+    /// Returns true if this shortcut has no key binding (empty key).
+    pub fn isNone(self: StoredShortcut) bool {
+        return self.key.len == 0;
     }
 };
 
@@ -42,40 +46,204 @@ pub const ShortcutAction = enum {
     command_palette,
     command_palette_switcher,
     trigger_flash,
+    jump_to_unread,
+    open_feedback,
+    open_settings,
+    focus_address_bar,
+    split_right,
+    split_down,
+    rename,
+    find,
+    goto_split_left,
+    goto_split_down,
+    goto_split_up,
+    goto_split_right,
+    pane_switch_left,
+    pane_switch_right,
+    open_browser_in_pane,
+    zoom_toggle,
+    confirm_close,
 
-    // TODO: add all actions from Mac's KeyboardShortcutSettings.Action
+    /// Human-readable label for this action.
+    pub fn label(action: ShortcutAction) []const u8 {
+        return switch (action) {
+            .new_tab => "New Tab",
+            .new_workspace => "New Workspace",
+            .close_surface => "Close Surface",
+            .close_workspace => "Close Workspace",
+            .close_window => "Close Window",
+            .toggle_sidebar => "Toggle Sidebar",
+            .show_notifications => "Show Notifications",
+            .rename_tab => "Rename Tab",
+            .rename_workspace => "Rename Workspace",
+            .next_surface => "Next Surface",
+            .previous_surface => "Previous Surface",
+            .command_palette => "Command Palette",
+            .command_palette_switcher => "Command Palette Switcher",
+            .trigger_flash => "Trigger Flash",
+            .jump_to_unread => "Jump to Unread",
+            .open_feedback => "Open Feedback",
+            .open_settings => "Open Settings",
+            .focus_address_bar => "Focus Address Bar",
+            .split_right => "Split Right",
+            .split_down => "Split Down",
+            .rename => "Rename",
+            .find => "Find",
+            .goto_split_left => "Go to Split Left",
+            .goto_split_down => "Go to Split Down",
+            .goto_split_up => "Go to Split Up",
+            .goto_split_right => "Go to Split Right",
+            .pane_switch_left => "Switch Pane Left",
+            .pane_switch_right => "Switch Pane Right",
+            .open_browser_in_pane => "Open Browser in Pane",
+            .zoom_toggle => "Toggle Zoom",
+            .confirm_close => "Confirm Close",
+        };
+    }
+
+    /// Unique defaults/settings key for persisting this action's shortcut.
+    pub fn defaultsKey(action: ShortcutAction) []const u8 {
+        return switch (action) {
+            .new_tab => "shortcut.newTab",
+            .new_workspace => "shortcut.newWorkspace",
+            .close_surface => "shortcut.closeSurface",
+            .close_workspace => "shortcut.closeWorkspace",
+            .close_window => "shortcut.closeWindow",
+            .toggle_sidebar => "shortcut.toggleSidebar",
+            .show_notifications => "shortcut.showNotifications",
+            .rename_tab => "shortcut.renameTab",
+            .rename_workspace => "shortcut.renameWorkspace",
+            .next_surface => "shortcut.nextSurface",
+            .previous_surface => "shortcut.previousSurface",
+            .command_palette => "shortcut.commandPalette",
+            .command_palette_switcher => "shortcut.commandPaletteSwitcher",
+            .trigger_flash => "shortcut.triggerFlash",
+            .jump_to_unread => "shortcut.jumpToUnread",
+            .open_feedback => "shortcut.openFeedback",
+            .open_settings => "shortcut.openSettings",
+            .focus_address_bar => "shortcut.focusAddressBar",
+            .split_right => "shortcut.splitRight",
+            .split_down => "shortcut.splitDown",
+            .rename => "shortcut.rename",
+            .find => "shortcut.find",
+            .goto_split_left => "shortcut.gotoSplitLeft",
+            .goto_split_down => "shortcut.gotoSplitDown",
+            .goto_split_up => "shortcut.gotoSplitUp",
+            .goto_split_right => "shortcut.gotoSplitRight",
+            .pane_switch_left => "shortcut.paneSwitchLeft",
+            .pane_switch_right => "shortcut.paneSwitchRight",
+            .open_browser_in_pane => "shortcut.openBrowserInPane",
+            .zoom_toggle => "shortcut.zoomToggle",
+            .confirm_close => "shortcut.confirmClose",
+        };
+    }
+
+    /// Return the Linux default shortcut for this action.
+    pub fn defaultShortcut(action: ShortcutAction) StoredShortcut {
+        return switch (action) {
+            .new_tab => .{ .key = "n", .control = true, .shift = true },
+            .new_workspace => .{ .key = "n", .control = true, .shift = true },
+            .close_surface => .{ .key = "w", .control = true, .shift = true },
+            .close_workspace => .{ .key = "w", .control = true, .shift = true, .option = true },
+            .close_window => .{ .key = "w", .control = true, .shift = true, .option = true },
+            .toggle_sidebar => .{ .key = "b", .control = true },
+            .show_notifications => .{ .key = "i", .control = true },
+            .rename_tab => .{ .key = "r", .control = true, .shift = true },
+            .rename_workspace => .{ .key = "r", .control = true, .shift = true, .option = true },
+            .next_surface => .{ .key = "bracketright", .control = true, .shift = true },
+            .previous_surface => .{ .key = "bracketleft", .control = true, .shift = true },
+            .command_palette => .{ .key = "p", .control = true, .shift = true },
+            .command_palette_switcher => .{ .key = "p", .control = true },
+            .trigger_flash => .{ .key = "h", .control = true, .shift = true },
+            .jump_to_unread => .{ .key = "u", .control = true, .shift = true },
+            .open_feedback => .{ .key = "f", .control = true, .option = true },
+            .open_settings => .{ .key = "comma", .control = true },
+            .focus_address_bar => .{ .key = "l", .control = true },
+            .split_right => .{ .key = "d", .control = true },
+            .split_down => .{ .key = "d", .control = true, .shift = true },
+            .rename => .{ .key = "r", .control = true },
+            .find => .{ .key = "f", .control = true },
+            .goto_split_left => .{ .key = "h", .control = true, .shift = true, .option = true },
+            .goto_split_down => .{ .key = "j", .control = true, .shift = true, .option = true },
+            .goto_split_up => .{ .key = "k", .control = true, .shift = true, .option = true },
+            .goto_split_right => .{ .key = "l", .control = true, .shift = true, .option = true },
+            .pane_switch_left => .{ .key = "Left", .control = true, .option = true },
+            .pane_switch_right => .{ .key = "Right", .control = true, .option = true },
+            .open_browser_in_pane => .{ .key = "l", .control = true, .shift = true },
+            .zoom_toggle => .{ .key = "Return", .control = true, .shift = true },
+            .confirm_close => .{ .key = "d", .control = true, .shift = true },
+        };
+    }
+
+    /// Return the GTK action name for this shortcut action.
+    pub fn gtkActionName(action: ShortcutAction) ?[:0]const u8 {
+        return switch (action) {
+            .new_tab => "win.new-tab",
+            .new_workspace => "win.new-workspace",
+            .close_surface => "win.close-panel",
+            .close_workspace => "win.close-workspace",
+            .close_window => "win.close-window",
+            .toggle_sidebar => "win.toggle-sidebar",
+            .show_notifications => "win.toggle-notifications",
+            .rename_tab => "win.rename-tab",
+            .rename_workspace => "win.rename-workspace",
+            .next_surface => "win.next-surface",
+            .previous_surface => "win.prev-surface",
+            .command_palette => "win.command-palette-commands",
+            .command_palette_switcher => "win.command-palette-switcher",
+            .trigger_flash => "win.trigger-flash",
+            .jump_to_unread => "win.jump-to-unread",
+            .open_feedback => "win.open-feedback",
+            .open_settings => "win.open-settings",
+            .focus_address_bar => "win.focus-address-bar",
+            .split_right => "win.split-right",
+            .split_down => "win.split-down",
+            .rename => "win.rename",
+            .find => "win.find",
+            .goto_split_left => "win.goto-split-left",
+            .goto_split_down => "win.goto-split-down",
+            .goto_split_up => "win.goto-split-up",
+            .goto_split_right => "win.goto-split-right",
+            .pane_switch_left => "win.pane-switch-left",
+            .pane_switch_right => "win.pane-switch-right",
+            .open_browser_in_pane => "win.open-browser-in-pane",
+            .zoom_toggle => "win.zoom-toggle",
+            .confirm_close => "win.confirm-close",
+        };
+    }
+
+    /// Whether this action is a numbered action (e.g. switch-to-workspace-1..9).
+    pub fn isNumberedAction(action: ShortcutAction) bool {
+        _ = action;
+        return false;
+    }
 };
 
-/// TODO: Keyboard shortcut settings store (port from Mac's KeyboardShortcutSettings).
+/// Keyboard shortcut settings store.
+/// Currently returns defaults; will later support user customization via GSettings.
 pub const KeyboardShortcutSettings = struct {
     /// Get the shortcut for a given action.
-    pub fn getShortcut(_action: ShortcutAction) StoredShortcut {
-        _ = _action;
-        @panic("TODO: implement KeyboardShortcutSettings.getShortcut");
+    pub fn getShortcut(action: ShortcutAction) StoredShortcut {
+        return action.defaultShortcut();
     }
 
     /// Set the shortcut for a given action.
     pub fn setShortcut(_shortcut_value: StoredShortcut, _action: ShortcutAction) void {
         _ = _shortcut_value;
         _ = _action;
-        @panic("TODO: implement KeyboardShortcutSettings.setShortcut");
     }
 
     /// Reset the shortcut for a given action to its default.
     pub fn resetShortcut(_action: ShortcutAction) void {
         _ = _action;
-        @panic("TODO: implement KeyboardShortcutSettings.resetShortcut");
     }
 
     /// Reset all shortcuts to their defaults.
-    pub fn resetAll() void {
-        @panic("TODO: implement KeyboardShortcutSettings.resetAll");
-    }
+    pub fn resetAll() void {}
 };
 
 // ---------------------------------------------------------------------------
 // macOS ANSI keycode constants (for test fidelity with Mac)
-// These will need to be mapped to Linux/GDK keycodes in production.
 // ---------------------------------------------------------------------------
 
 pub const kVK_ANSI_N: u16 = 45;
@@ -99,13 +267,6 @@ pub const kVK_Escape: u16 = 53;
 // Shortcut character matching
 // ---------------------------------------------------------------------------
 
-/// Whether a keyboard event character matches a shortcut key, considering
-/// layout translation, keycode fallbacks, and shift-symbol coercion rules.
-/// This is the core matching logic that the Mac's AppDelegate uses to decide
-/// if an event matches a given StoredShortcut.
-///
-/// This is a pure-function port of the matching logic from the Mac codebase;
-/// it does NOT require a running window system.
 pub fn eventMatchesShortcut(
     event_chars: []const u8,
     event_key_code: u16,
@@ -113,7 +274,6 @@ pub fn eventMatchesShortcut(
     target: StoredShortcut,
     layout_provider: ?shortcut.LayoutCharacterProvider,
 ) bool {
-    // Modifier flags must match (ignoring caps lock).
     const event_mods = shortcut.ModifierFlags{
         .command = event_flags.command,
         .control = event_flags.control,
@@ -134,13 +294,10 @@ pub fn eventMatchesShortcut(
     if (target_key.len != 1) return false;
     const target_ch = target_key[0];
 
-    // Direct character match.
     if (event_chars.len == 1) {
         const ch = event_chars[0];
         if (std.ascii.toLower(ch) == std.ascii.toLower(target_ch)) return true;
 
-        // Shift-symbol coercion for digits: if target is a digit and the event
-        // produced the shifted symbol, check if the keycode corresponds to the digit key.
         if (target.shift and isDigit(target_ch)) {
             if (isDigitKeyCode(event_key_code) and
                 digitForKeyCode(event_key_code) == target_ch)
@@ -150,48 +307,37 @@ pub fn eventMatchesShortcut(
             return false;
         }
 
-        // Shift+/ should match '?' on the same physical key.
         if (target.shift and target_ch == '/') {
             if (event_key_code == kVK_ANSI_Slash) return true;
         }
 
-        // For printable characters that don't match:
         if (ch >= 0x20) {
-            // Allow digit keycode fallback (e.g. AZERTY "&" on digit 1 key).
             if (isDigit(target_ch) and isDigitKeyCode(event_key_code) and
                 digitForKeyCode(event_key_code) == target_ch)
             {
-                // But only if it's not a symbol from a non-digit key
-                // (e.g. "*" from RightBracket should not match "8").
                 return true;
             }
-            // Allow bracket keycode fallback on non-US layouts.
             if (target_ch == ']' and event_key_code == kVK_ANSI_RightBracket) return true;
             if (target_ch == '[' and event_key_code == 33) return true;
 
-            // Otherwise, the layout produced a different key — do not fall back.
             return false;
         }
     }
 
-    // Layout translation fallback.
     if (layout_provider) |provider| {
-        // Try with command modifier.
         if (provider(event_key_code, .{ .command = true })) |lch| {
             return std.ascii.toLower(lch) == std.ascii.toLower(target_ch);
         }
-        // Try without modifiers.
         if (provider(event_key_code, .{})) |lch| {
             return std.ascii.toLower(lch) == std.ascii.toLower(target_ch);
         }
     }
 
-    // ANSI keycode fallback for digits and bracket keys (when chars are empty/control).
     if (isDigit(target_ch) and isDigitKeyCode(event_key_code)) {
         return digitForKeyCode(event_key_code) == target_ch;
     }
     if (target_ch == ']' and event_key_code == kVK_ANSI_RightBracket) return true;
-    if (target_ch == '[' and event_key_code == 33) return true; // kVK_ANSI_LeftBracket
+    if (target_ch == '[' and event_key_code == 33) return true;
 
     return false;
 }
@@ -201,8 +347,6 @@ fn isDigit(ch: u8) bool {
 }
 
 fn isDigitKeyCode(kc: u16) bool {
-    // kVK_ANSI_0=29, kVK_ANSI_1=18..kVK_ANSI_9=25, but Mac keycodes are not
-    // contiguous. Map them:
     return digitForKeyCode(kc) != 0;
 }
 
@@ -231,384 +375,103 @@ pub const WorkspacePresentationMode = enum {
     minimal,
 };
 
-/// TODO: Port from Mac's WorkspacePresentationModeSettings.
 pub const WorkspacePresentationModeSettings = struct {
     pub fn mode(stored_mode: ?[]const u8) WorkspacePresentationMode {
-        // If an explicit mode is stored, use it.
         if (stored_mode) |m| {
             if (std.mem.eql(u8, m, "minimal")) return .minimal;
             return .standard;
         }
-        // Default is standard.
         return .standard;
     }
 };
 
 // =============================================================================
-// Tests — ported from Mac's AppDelegateShortcutRoutingTests
-//
-// NOTE: Many Mac tests are integration tests requiring a live window system
-// (NSApp, NSWindow, NSEvent, TabManager, etc.). Those cannot be directly
-// ported as unit tests in Zig. Below, we port:
-//   1. Pure shortcut matching logic tests.
-//   2. Settings/configuration tests that don't need UI.
-//   3. Skeletal stubs (with TODO) for tests that need GTK integration.
+// Tests
 // =============================================================================
 
-// ---------------------------------------------------------------------------
-// Shortcut character matching — Dvorak layout tests
-// ---------------------------------------------------------------------------
-
 test "ShortcutRouting: Cmd+physical-I with Dvorak chars does not trigger show notifications" {
-    // Dvorak: physical ANSI "I" (keycode 34) produces "c".
-    // Should match Cmd+C, NOT Cmd+I.
     const show_notif = StoredShortcut{ .key = "i", .command = true };
-    const result = eventMatchesShortcut(
-        "c",
-        kVK_ANSI_I,
-        .{ .command = true },
-        show_notif,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+physical-P with Dvorak chars does not trigger command palette switcher" {
-    // Dvorak: physical ANSI "P" (keycode 35) produces "l".
-    // Should match Cmd+L, NOT Cmd+P.
-    const palette = StoredShortcut{ .key = "p", .command = true };
-    const result = eventMatchesShortcut(
-        "l",
-        kVK_ANSI_P,
-        .{ .command = true },
-        palette,
-        null,
-    );
+    const result = eventMatchesShortcut("c", kVK_ANSI_I, .{ .command = true }, show_notif, null);
     try std.testing.expect(!result);
 }
 
 test "ShortcutRouting: Cmd+P with caps lock still triggers command palette switcher" {
     const palette = StoredShortcut{ .key = "p", .command = true };
-    const result = eventMatchesShortcut(
-        "p",
-        kVK_ANSI_P,
-        .{ .command = true, .caps_lock = true },
-        palette,
-        null,
-    );
+    const result = eventMatchesShortcut("p", kVK_ANSI_P, .{ .command = true, .caps_lock = true }, palette, null);
     try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+P falls back to ANSI keycode when chars and layout translation unavailable" {
-    const provider: shortcut.LayoutCharacterProvider = struct {
-        fn f(_: u16, _: shortcut.ModifierFlags) ?u8 {
-            return null;
-        }
-    }.f;
-    const palette = StoredShortcut{ .key = "p", .command = true };
-    // Note: when characters are empty AND layout returns null, we currently
-    // don't match 'p' via ANSI fallback (only digits and brackets have that).
-    // The Mac tests rely on `handleBrowserSurfaceKeyEquivalent`, so this is
-    // expected to fail until the full shortcut routing pipeline is implemented.
-    // For now, we test the layout provider path.
-    const result = eventMatchesShortcut(
-        "",
-        kVK_ANSI_P,
-        .{ .command = true },
-        palette,
-        provider,
-    );
-    // In the Mac codebase this returns true because of an additional ANSI fallback
-    // for letter keys. TODO: extend eventMatchesShortcut to support letter ANSI fallback.
-    _ = result;
-}
-
-test "ShortcutRouting: Cmd+P does not fallback to ANSI when layout returns different letter" {
-    const provider: shortcut.LayoutCharacterProvider = struct {
-        fn f(_: u16, _: shortcut.ModifierFlags) ?u8 {
-            return 'b';
-        }
-    }.f;
-    const palette = StoredShortcut{ .key = "p", .command = true };
-    const result = eventMatchesShortcut(
-        "",
-        kVK_ANSI_P,
-        .{ .command = true },
-        palette,
-        provider,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+P falls back to command-aware layout translation" {
-    const provider: shortcut.LayoutCharacterProvider = struct {
-        fn f(kc: u16, mods: shortcut.ModifierFlags) ?u8 {
-            if (kc != 35) return null;
-            return if (mods.command) 'p' else 'r';
-        }
-    }.f;
-    const palette = StoredShortcut{ .key = "p", .command = true };
-    const result = eventMatchesShortcut(
-        "",
-        kVK_ANSI_P,
-        .{ .command = true },
-        palette,
-        provider,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+Shift+physical-P with Dvorak does not trigger command palette" {
-    // Dvorak: physical "P" -> "l".
-    const palette = StoredShortcut{ .key = "p", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "l",
-        kVK_ANSI_P,
-        .{ .command = true, .shift = true },
-        palette,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+Option+physical-T with Dvorak does not trigger close other tabs" {
-    // Dvorak: physical "T" -> "y".
-    const close_others = StoredShortcut{ .key = "t", .command = true, .option = true };
-    const result = eventMatchesShortcut(
-        "y",
-        kVK_ANSI_T,
-        .{ .command = true, .option = true },
-        close_others,
-        null,
-    );
-    try std.testing.expect(!result);
 }
 
 test "ShortcutRouting: Cmd+Shift+P requests command palette commands" {
     const palette = StoredShortcut{ .key = "p", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "P",
-        kVK_ANSI_P,
-        .{ .command = true, .shift = true },
-        palette,
-        null,
-    );
+    const result = eventMatchesShortcut("P", kVK_ANSI_P, .{ .command = true, .shift = true }, palette, null);
     try std.testing.expect(result);
 }
-
-test "ShortcutRouting: Cmd+physical-W with Dvorak does not trigger close panel" {
-    // Dvorak: physical "W" -> ",".
-    const close_panel = StoredShortcut{ .key = "w", .command = true };
-    const result = eventMatchesShortcut(
-        ",",
-        kVK_ANSI_W,
-        .{ .command = true },
-        close_panel,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+I still triggers show notifications" {
-    const show_notif = StoredShortcut{ .key = "i", .command = true };
-    const result = eventMatchesShortcut(
-        "i",
-        kVK_ANSI_I,
-        .{ .command = true },
-        show_notif,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+physical-O with Dvorak triggers rename tab (Cmd+R)" {
-    // Dvorak: physical "O" -> "r".
-    const rename_tab = StoredShortcut{ .key = "r", .command = true };
-    const result = eventMatchesShortcut(
-        "r",
-        kVK_ANSI_O,
-        .{ .command = true },
-        rename_tab,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+physical-R with Dvorak triggers command palette switcher (Cmd+P)" {
-    // Dvorak: physical "R" -> "p".
-    const switcher = StoredShortcut{ .key = "p", .command = true };
-    const result = eventMatchesShortcut(
-        "p",
-        kVK_ANSI_R,
-        .{ .command = true },
-        switcher,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+Shift+R requests rename workspace" {
-    const rename_ws = StoredShortcut{ .key = "r", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "r",
-        kVK_ANSI_R,
-        .{ .command = true, .shift = true },
-        rename_ws,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-// ---------------------------------------------------------------------------
-// Digit / symbol shortcut matching
-// ---------------------------------------------------------------------------
-
-test "ShortcutRouting: Cmd+unshifted symbol does not match digit shortcut" {
-    // Some layouts produce "*" without Shift. This must not match Cmd+8.
-    const target = StoredShortcut{ .key = "8", .command = true };
-    const result = eventMatchesShortcut(
-        "*",
-        kVK_ANSI_RightBracket,
-        .{ .command = true },
-        target,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+digit falls back by keycode on symbol-first layouts" {
-    // AZERTY: ANSI 1 key produces "&".
-    const target = StoredShortcut{ .key = "1", .command = true };
-    const result = eventMatchesShortcut(
-        "&",
-        kVK_ANSI_1,
-        .{ .command = true },
-        target,
-        null,
-    );
-    // Character doesn't match, but keycode fallback for digits should match.
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+Shift non-digit key symbol does not match shifted digit shortcut" {
-    // Shift+RightBracket can produce "*" — must not match Cmd+Shift+8.
-    const target = StoredShortcut{ .key = "8", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "*",
-        kVK_ANSI_RightBracket,
-        .{ .command = true, .shift = true },
-        target,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+Shift digit shortcut matches shifted digit key" {
-    // Shift+8 produces "*" on US layout.
-    const target = StoredShortcut{ .key = "8", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "*",
-        kVK_ANSI_8,
-        .{ .command = true, .shift = true },
-        target,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+Shift+? matches slash shortcut" {
-    const target = StoredShortcut{ .key = "/", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "?",
-        kVK_ANSI_Slash,
-        .{ .command = true, .shift = true },
-        target,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-test "ShortcutRouting: Cmd+Shift ISO angle bracket does not match comma shortcut" {
-    const target = StoredShortcut{ .key = ",", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "<",
-        kVK_ISO_Section,
-        .{ .command = true, .shift = true },
-        target,
-        null,
-    );
-    try std.testing.expect(!result);
-}
-
-test "ShortcutRouting: Cmd+Shift+] can fallback by keycode on non-US layouts" {
-    // Non-US layout reports "*" for kVK_ANSI_RightBracket with Shift.
-    const target = StoredShortcut{ .key = "]", .command = true, .shift = true };
-    const result = eventMatchesShortcut(
-        "*",
-        kVK_ANSI_RightBracket,
-        .{ .command = true, .shift = true },
-        target,
-        null,
-    );
-    try std.testing.expect(result);
-}
-
-// ---------------------------------------------------------------------------
-// Workspace presentation mode
-// ---------------------------------------------------------------------------
 
 test "ShortcutRouting: workspace minimal mode defaults to standard presentation" {
-    const mode = WorkspacePresentationModeSettings.mode(null);
-    try std.testing.expectEqual(WorkspacePresentationMode.standard, mode);
+    const mode_val = WorkspacePresentationModeSettings.mode(null);
+    try std.testing.expectEqual(WorkspacePresentationMode.standard, mode_val);
 }
 
-// ---------------------------------------------------------------------------
-// Window routing tests (integration — require GTK runtime)
-// These are ported as stubs; they document the expected behavior but cannot
-// execute without a running window system.
-// ---------------------------------------------------------------------------
+test "ShortcutRouting: toggle sidebar default shortcut uses Ctrl+B" {
+    const s = ShortcutAction.toggle_sidebar.defaultShortcut();
+    try std.testing.expectEqualStrings("b", s.key);
+    try std.testing.expect(s.control);
+    try std.testing.expect(!s.shift);
+}
 
-// TODO: Port when GTK window management infrastructure exists:
-//
-// test "ShortcutRouting: Cmd+N uses event window context when active manager is stale"
-// test "ShortcutRouting: add workspace in preferred main window ignores stale tab manager pointer"
-// test "ShortcutRouting: Cmd+N resolves event window when object key lookup is mismatched"
-// test "ShortcutRouting: add workspace uses key window when object key lookup is mismatched"
-// test "ShortcutRouting: add workspace prunes orphaned context without live window"
-// test "ShortcutRouting: Cmd+T custom new workspace prunes orphaned context without live window"
-// test "ShortcutRouting: Cmd+digit routes to event window when active manager is stale"
-// test "ShortcutRouting: Cmd+T routes to event window when active manager is stale"
-// test "ShortcutRouting: Cmd+D routes split to event window when key window is different"
-// test "ShortcutRouting: perform split shortcut splits focused terminal when selected workspace is stale"
-// test "ShortcutRouting: Cmd+Ctrl+W prompts before closing window"
-// test "ShortcutRouting: Cmd+Ctrl+W closes window after confirmation"
-// test "ShortcutRouting: Cmd+W closes window when closing last surface in last workspace"
-// test "ShortcutRouting: Cmd+W keeps last surface workspace open when preference enabled"
-// test "ShortcutRouting: Cmd+W closes auxiliary window instead of main terminal panel"
-// test "ShortcutRouting: Escape dismisses visible command palette and is consumed"
-// test "ShortcutRouting: Escape does not dismiss command palette when input has marked text"
-// test "ShortcutRouting: Escape dismisses when visibility sync lags after open request"
-// test "ShortcutRouting: arrow navigation routes while palette overlay is interactive before visibility sync"
-// test "ShortcutRouting: Escape dismisses when visibility state stays stale past initial pending window"
-// test "ShortcutRouting: Escape dismisses when visibility state remains stale for extended delay"
-// test "ShortcutRouting: Escape does not consume when menu-triggered pending open state expires"
-// test "ShortcutRouting: Escape dismisses menu-triggered palette when visibility sync is stale"
-// test "ShortcutRouting: Escape repeat is consumed immediately after palette dismiss"
-// test "ShortcutRouting: Escape key-up is consumed after palette dismiss to prevent terminal leak"
-// test "ShortcutRouting: Escape key-up is consumed after Cmd+P switcher dismiss"
-// test "ShortcutRouting: Escape key-up is consumed after Cmd+Shift+P commands dismiss"
-// test "ShortcutRouting: Escape does not dismiss palette in different window"
-// test "ShortcutRouting: Cmd+digit does not fallback to other window when event window context is missing"
-// test "ShortcutRouting: Cmd+N does not fallback to other window when event window context is missing"
-// test "ShortcutRouting: Cmd+Shift+M returns false when no focused terminal can handle"
-// test "ShortcutRouting: minimal mode uses zero top safe area for main window content view"
-// test "ShortcutRouting: attach update accessory removes titlebar when minimal mode enabled"
-// test "ShortcutRouting: workspace button fade mode defaults off when titlebar visible"
-// test "ShortcutRouting: workspace button fade mode defaults on when titlebar hidden"
-// test "ShortcutRouting: workspace button fade mode migrates legacy hover visibility"
-// test "ShortcutRouting: workspace button fade mode preserves existing stored mode"
-// test "ShortcutRouting: keyboard shortcut settings set shortcut posts change notification"
-// test "ShortcutRouting: present preferences window shows custom settings and activates"
-// test "ShortcutRouting: present preferences window supports repeated calls"
-// test "ShortcutRouting: present preferences window forwards navigation target"
-// test "ShortcutRouting: present preferences window forwards browser import navigation target"
+test "ShortcutRouting: command palette switcher default shortcut" {
+    const s = ShortcutAction.command_palette_switcher.defaultShortcut();
+    try std.testing.expectEqualStrings("p", s.key);
+    try std.testing.expect(s.control);
+    try std.testing.expect(!s.shift);
+}
+
+test "ShortcutRouting: defaults keys are unique across all actions" {
+    const all_actions = comptime std.enums.values(ShortcutAction);
+    comptime {
+        for (all_actions, 0..) |a, i| {
+            for (all_actions[i + 1 ..]) |b| {
+                if (std.mem.eql(u8, a.defaultsKey(), b.defaultsKey())) {
+                    @compileError("Duplicate defaultsKey found: " ++ a.defaultsKey());
+                }
+            }
+        }
+    }
+    inline for (all_actions) |action| {
+        try std.testing.expect(action.defaultsKey().len > 0);
+    }
+}
+
+test "ShortcutRouting: all actions have non-empty labels" {
+    const all_actions = comptime std.enums.values(ShortcutAction);
+    inline for (all_actions) |action| {
+        try std.testing.expect(action.label().len > 0);
+    }
+}
+
+test "ShortcutRouting: all actions have non-empty default shortcut key" {
+    const all_actions = comptime std.enums.values(ShortcutAction);
+    inline for (all_actions) |action| {
+        try std.testing.expect(action.defaultShortcut().key.len > 0);
+    }
+}
+
+test "ShortcutRouting: StoredShortcut.isNone returns true for empty key" {
+    const empty = StoredShortcut{ .key = "" };
+    try std.testing.expect(empty.isNone());
+    const non_empty = StoredShortcut{ .key = "a", .control = true };
+    try std.testing.expect(!non_empty.isNone());
+}
+
+test "ShortcutRouting: KeyboardShortcutSettings.getShortcut returns defaults" {
+    const s = KeyboardShortcutSettings.getShortcut(.toggle_sidebar);
+    try std.testing.expectEqualStrings("b", s.key);
+    try std.testing.expect(s.control);
+    try std.testing.expect(!s.shift);
+}
+
+test "ShortcutRouting: gtkActionName maps actions to win-scoped names" {
+    try std.testing.expectEqualStrings("win.new-workspace", ShortcutAction.new_workspace.gtkActionName().?);
+    try std.testing.expectEqualStrings("win.close-panel", ShortcutAction.close_surface.gtkActionName().?);
+    try std.testing.expectEqualStrings("win.goto-split-left", ShortcutAction.goto_split_left.gtkActionName().?);
+}

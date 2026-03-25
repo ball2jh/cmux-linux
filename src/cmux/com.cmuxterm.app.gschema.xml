@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.cmuxterm.app" path="/com/cmuxterm/app/">
+
+    <!-- Workspace behavior -->
+    <key name="workspace-auto-reorder-on-notification" type="b">
+      <default>true</default>
+      <summary>Auto-reorder workspaces on notification</summary>
+    </key>
+    <key name="close-workspace-on-last-surface-shortcut" type="b">
+      <default>true</default>
+      <summary>Close workspace when last surface is closed via shortcut</summary>
+    </key>
+    <key name="new-workspace-placement" type="s">
+      <default>'after-current'</default>
+      <choices>
+        <choice value="top"/>
+        <choice value="after-current"/>
+        <choice value="end"/>
+      </choices>
+      <summary>Where new workspaces are placed</summary>
+    </key>
+
+    <!-- Sidebar appearance -->
+    <key name="sidebar-branch-vertical-layout" type="b">
+      <default>true</default>
+      <summary>Use vertical layout for branch info in sidebar</summary>
+    </key>
+    <key name="sidebar-hide-all-details" type="b">
+      <default>false</default>
+      <summary>Hide all detail rows in sidebar workspace entries</summary>
+    </key>
+    <key name="sidebar-show-notification-message" type="b">
+      <default>true</default>
+      <summary>Show notification messages in sidebar</summary>
+    </key>
+    <key name="sidebar-active-tab-indicator-style" type="s">
+      <default>'left-rail'</default>
+      <choices>
+        <choice value="left-rail"/>
+        <choice value="solid-fill"/>
+      </choices>
+      <summary>Active tab indicator style in sidebar</summary>
+    </key>
+
+    <!-- UI modes -->
+    <key name="workspace-presentation-mode" type="s">
+      <default>'standard'</default>
+      <choices>
+        <choice value="standard"/>
+        <choice value="minimal"/>
+      </choices>
+      <summary>Workspace presentation mode</summary>
+    </key>
+    <key name="workspace-titlebar-visible" type="b">
+      <default>true</default>
+      <summary>Whether workspace titlebar is visible</summary>
+    </key>
+    <key name="workspace-buttons-fade-mode" type="s">
+      <default>'disabled'</default>
+      <choices>
+        <choice value="enabled"/>
+        <choice value="disabled"/>
+      </choices>
+      <summary>Workspace buttons fade mode</summary>
+    </key>
+    <key name="pane-first-click-focus-enabled" type="b">
+      <default>false</default>
+      <summary>Focus pane on first click</summary>
+    </key>
+
+    <!-- Appearance -->
+    <key name="appearance-mode" type="s">
+      <default>'system'</default>
+      <choices>
+        <choice value="system"/>
+        <choice value="light"/>
+        <choice value="dark"/>
+      </choices>
+      <summary>Application appearance mode</summary>
+    </key>
+
+    <!-- Warnings/dialogs -->
+    <key name="warn-before-quit-shortcut" type="b">
+      <default>true</default>
+      <summary>Show warning dialog before quitting via shortcut</summary>
+    </key>
+
+    <!-- Command palette -->
+    <key name="command-palette-rename-select-all-on-focus" type="b">
+      <default>true</default>
+      <summary>Select all text when focusing rename field in command palette</summary>
+    </key>
+    <key name="command-palette-switcher-search-all-surfaces" type="b">
+      <default>false</default>
+      <summary>Search all surfaces in command palette switcher</summary>
+    </key>
+
+    <!-- Socket control -->
+    <key name="socket-control-mode" type="s">
+      <default>'cmux-only'</default>
+      <choices>
+        <choice value="off"/>
+        <choice value="cmux-only"/>
+        <choice value="automation"/>
+        <choice value="password"/>
+        <choice value="allow-all"/>
+      </choices>
+      <summary>Socket control access mode</summary>
+    </key>
+
+    <!-- Notifications -->
+    <key name="notification-dock-badge-enabled" type="b">
+      <default>true</default>
+      <summary>Show notification badge in dock/taskbar</summary>
+    </key>
+    <key name="notification-pane-ring-enabled" type="b">
+      <default>true</default>
+      <summary>Show ring effect on pane for notifications</summary>
+    </key>
+    <key name="notification-pane-flash-enabled" type="b">
+      <default>true</default>
+      <summary>Flash pane on notification</summary>
+    </key>
+
+    <!-- Browser -->
+    <key name="browser-search-engine" type="s">
+      <default>'google'</default>
+      <summary>Default search engine for browser panels</summary>
+    </key>
+    <key name="browser-search-suggestions-enabled" type="b">
+      <default>true</default>
+      <summary>Show search suggestions in browser</summary>
+    </key>
+    <key name="browser-theme-mode" type="s">
+      <default>'system'</default>
+      <choices>
+        <choice value="system"/>
+        <choice value="light"/>
+        <choice value="dark"/>
+      </choices>
+      <summary>Browser theme mode</summary>
+    </key>
+    <key name="browser-open-terminal-links-in-cmux-browser" type="b">
+      <default>true</default>
+      <summary>Open terminal links in cmux browser instead of external browser</summary>
+    </key>
+
+    <!-- Telemetry -->
+    <key name="send-anonymous-telemetry" type="b">
+      <default>true</default>
+      <summary>Send anonymous usage telemetry</summary>
+    </key>
+
+    <!-- Keyboard shortcuts (GTK accelerator format) -->
+    <!-- Only actions currently in ShortcutAction enum; more will be added. -->
+    <key name="shortcut-toggle-sidebar" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;b'</default>
+      <summary>Toggle sidebar</summary>
+    </key>
+    <key name="shortcut-new-tab" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;n'</default>
+      <summary>New workspace</summary>
+    </key>
+    <key name="shortcut-close-window" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;w'</default>
+      <summary>Close window</summary>
+    </key>
+    <key name="shortcut-close-workspace" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;&lt;Alt&gt;w'</default>
+      <summary>Close workspace / surface</summary>
+    </key>
+    <key name="shortcut-show-notifications" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;i'</default>
+      <summary>Show notifications</summary>
+    </key>
+    <key name="shortcut-rename-tab" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;r'</default>
+      <summary>Rename tab</summary>
+    </key>
+    <key name="shortcut-rename-workspace" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;&lt;Alt&gt;r'</default>
+      <summary>Rename workspace</summary>
+    </key>
+    <key name="shortcut-next-surface" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;bracketright'</default>
+      <summary>Next surface</summary>
+    </key>
+    <key name="shortcut-previous-surface" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;bracketleft'</default>
+      <summary>Previous surface</summary>
+    </key>
+    <key name="shortcut-command-palette" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;&lt;Alt&gt;p'</default>
+      <summary>Open command palette</summary>
+    </key>
+    <key name="shortcut-command-palette-switcher" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;p'</default>
+      <summary>Open command palette switcher</summary>
+    </key>
+    <key name="shortcut-trigger-flash" type="s">
+      <default>'&lt;Control&gt;&lt;Shift&gt;h'</default>
+      <summary>Trigger flash</summary>
+    </key>
+
+  </schema>
+</schemalist>
