@@ -41,13 +41,22 @@ export GTK_A11Y=atspi
 gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
 
 # --- Clean up stale mutter from previous runs ---
-pkill -9 -f 'mutter.*headless' 2>/dev/null || true
-sleep 0.5
-rm -f "$XDG_RUNTIME_DIR"/wayland-*.lock 2>/dev/null || true
+# Only remove lock files for sockets that are no longer held by a live
+# compositor — never nuke Hyprland's or another session's locks.
+STALE_MUTTER_PIDS=$(pgrep -f 'mutter.*headless' 2>/dev/null || true)
+if [ -n "$STALE_MUTTER_PIDS" ]; then
+    kill -9 $STALE_MUTTER_PIDS 2>/dev/null || true
+    sleep 0.5
+    for lockfile in "$XDG_RUNTIME_DIR"/wayland-*.lock; do
+        [ -e "$lockfile" ] || continue
+        if ! flock -n "$lockfile" true 2>/dev/null; then
+            continue  # still locked by a live compositor — leave it alone
+        fi
+        rm -f "$lockfile" "${lockfile%.lock}" 2>/dev/null || true
+    done
+fi
 
 # --- Ensure AT-SPI services are running on the session bus ---
-# at-spi-bus-launcher manages the AT-SPI bus. If it's not running
-# (e.g. killed by a previous test run), restart it.
 if ! pgrep -f at-spi-bus-launcher >/dev/null 2>&1; then
     echo "Starting AT-SPI bus launcher..."
     /usr/lib/at-spi-bus-launcher &>/dev/null &
@@ -60,17 +69,23 @@ if ! pgrep -f at-spi2-registryd >/dev/null 2>&1; then
 fi
 
 # --- Start headless Wayland compositor ---
+# Snapshot existing sockets so we detect the NEW one mutter creates,
+# not the live compositor's (e.g. Hyprland's).
+EXISTING_SOCKETS=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v lock || true)
+
 mutter --wayland --no-x11 --headless &>/dev/null &
 MUTTER_PID=$!
 
-# Wait for wayland socket
 WAYLAND_DISPLAY=""
 for i in $(seq 1 20); do
-    SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v lock | head -1 || true)
-    if [ -n "$SOCK" ]; then
-        export WAYLAND_DISPLAY=$(basename "$SOCK")
-        break
-    fi
+    for SOCK in "$XDG_RUNTIME_DIR"/wayland-*; do
+        [ -e "$SOCK" ] || continue
+        echo "$SOCK" | grep -q '\.lock$' && continue
+        if ! echo "$EXISTING_SOCKETS" | grep -qF "$SOCK"; then
+            export WAYLAND_DISPLAY=$(basename "$SOCK")
+            break 2
+        fi
+    done
     sleep 0.25
 done
 
