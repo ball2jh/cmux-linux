@@ -27,6 +27,11 @@ pub const render_diagnostics = @import("render_diagnostics.zig");
 pub const image_transfer = @import("image_transfer.zig");
 pub const url_resolve = @import("url_resolve.zig");
 
+// Claude Code integration.
+pub const socket_client = @import("socket_client.zig");
+pub const claude_hook = @import("claude_hook.zig");
+pub const claude_hook_sessions = @import("claude_hook_sessions.zig");
+
 // Utilities.
 pub const sidebar_drop_planner = @import("sidebar_drop_planner.zig");
 pub const sidebar_path = @import("sidebar_path.zig");

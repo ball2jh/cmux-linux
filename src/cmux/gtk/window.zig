@@ -74,7 +74,8 @@ pub const CmuxWindow = extern struct {
         workspace_stack: *gtk.Stack = undefined,
         window_title: *adw.WindowTitle = undefined,
         toast_overlay: *adw.ToastOverlay = undefined,
-        sidebar_toggle: *gtk.ToggleButton = undefined,
+        palette_overlay: *gtk.Overlay = undefined,
+        headerbar: *adw.HeaderBar = undefined,
         help_btn: *gtk.Button = undefined,
 
         // Help menu / feedback composer (built programmatically)
@@ -89,9 +90,9 @@ pub const CmuxWindow = extern struct {
 
         // Programmatic widgets (not in BLP template)
         pane_tab_bar: ?*gtk.Box = null,
-        titlebar_controls: ?*gtk.Box = null,
         toggle_sidebar_btn: ?*gtk.Button = null,
         notifications_btn: ?*gtk.Button = null,
+        notifications_badge: ?*gtk.Label = null,
         new_tab_btn: ?*gtk.Button = null,
         new_terminal_btn: ?*gtk.Button = null,
 
@@ -138,6 +139,9 @@ pub const CmuxWindow = extern struct {
         // Close confirmation dialog state
         active_close_dialog: ?*adw.AlertDialog = null,
         active_close_dialog_on_confirm: ?CloseDialogAction = null,
+
+        // Sidebar context menu: target workspace ID for action handlers
+        sidebar_ctx_target_id: ?cmux.Uuid = null,
 
         pub var offset: c_int = 0;
     };
@@ -228,12 +232,16 @@ pub const CmuxWindow = extern struct {
             log.warn("failed to load ghostty config: {}", .{err});
         }
 
+        // Load sidebar CSS for rich row styling.
+        loadSidebarCss();
+
         // Build the programmatic pane tab bar and titlebar controls.
         self.buildPaneTabBar();
         self.buildTitlebarControls();
 
         // Set up the sidebar resizer drag handle.
         self.setupSidebarResizer();
+
 
         // Attempt session restore
         var did_restore = false;
@@ -1256,8 +1264,6 @@ pub const CmuxWindow = extern struct {
         // Apply the initial sidebar width.
         self.applySidebarWidth(priv.sidebar_width);
 
-        // Sync the toggle button state.
-        priv.sidebar_toggle.setActive(@intFromBool(priv.sidebar_visible));
     }
 
     fn onResizerDragBegin(
@@ -1323,14 +1329,6 @@ pub const CmuxWindow = extern struct {
         return self.private().sidebar_visible;
     }
 
-    /// Sidebar toggle button callback from BLP template.
-    fn onSidebarToggleClicked(
-        _: *gtk.ToggleButton,
-        self: *Self,
-    ) callconv(.c) void {
-        self.toggleSidebar(null);
-    }
-
     // -----------------------------------------------------------------
     // Command palette
     // -----------------------------------------------------------------
@@ -1349,18 +1347,9 @@ pub const CmuxWindow = extern struct {
             .executeFn = &onPaletteCommandExecuted,
         });
 
-        // Add the palette as an overlay on the toast_overlay widget.
-        // Unparent toast_overlay from toolbar_view first, then reparent into overlay.
-        const toolbar_view = priv.toast_overlay.as(gtk.Widget).getParent();
-        priv.toast_overlay.as(gtk.Widget).unparent();
-        const overlay = gtk.Overlay.new();
-        overlay.setChild(priv.toast_overlay.as(gtk.Widget));
-        overlay.addOverlay(palette.as(gtk.Widget));
-        if (toolbar_view) |tv| {
-            if (gobject.ext.cast(adw.ToolbarView, tv)) |tbv| {
-                tbv.setContent(overlay.as(gtk.Widget));
-            }
-        }
+        // Add the palette as an overlay on top of the toast_overlay.
+        // The palette_overlay is defined in the blueprint wrapping toast_overlay.
+        priv.palette_overlay.addOverlay(palette.as(gtk.Widget));
 
         // Install keyboard shortcuts via window-level key controller
         const key_ctrl = gtk.EventControllerKey.new();
@@ -1523,9 +1512,10 @@ pub const CmuxWindow = extern struct {
 
     fn uuidToName(id: cmux.Uuid) [36:0]u8 {
         const formatted = id.format();
-        var buf: [36:0]u8 = undefined;
-        @memcpy(&buf, &formatted);
-        return buf;
+        var buf: [37]u8 = undefined;
+        @memcpy(buf[0..36], &formatted);
+        buf[36] = 0;
+        return buf[0..36 :0].*;
     }
 
     fn nameToUuid(name_z: [*:0]const u8) ?cmux.Uuid {
@@ -1600,6 +1590,7 @@ pub const CmuxWindow = extern struct {
 
         const name = uuidToName(id);
         _ = priv.workspace_stack.addNamed(split_tree.as(gtk.Widget), &name);
+
     }
 
     fn onSplitTreeActiveSurfaceChanged(
@@ -1632,7 +1623,8 @@ pub const CmuxWindow = extern struct {
         const name = uuidToName(id);
         priv.workspace_stack.setVisibleChildName(&name);
 
-        // Update sidebar selection (signal handler breaks feedback loop)
+        // Update sidebar selection and active CSS class
+        self.updateSidebarActiveClass(id);
         if (self.findSidebarRow(id)) |row| {
             priv.sidebar_list.selectRow(row);
         }
@@ -1646,6 +1638,25 @@ pub const CmuxWindow = extern struct {
         // Focus the active surface in the newly selected workspace
         if (self.getActiveSurface()) |surface| {
             _ = surface.as(gtk.Widget).grabFocus();
+        }
+    }
+
+    /// Update the "active" CSS class on sidebar rows: add to the selected
+    /// workspace's row, remove from all others.
+    fn updateSidebarActiveClass(self: *Self, active_id: cmux.Uuid) void {
+        const priv = self.private();
+        var idx: c_int = 0;
+        while (true) : (idx += 1) {
+            const row = priv.sidebar_list.getRowAtIndex(idx) orelse break;
+            const child = row.getChild() orelse continue;
+            const outer_box = gobject.ext.cast(gtk.Box, child) orelse continue;
+            const row_name_z: [*:0]const u8 = row.as(gtk.Widget).getName();
+            const row_id = nameToUuid(row_name_z) orelse continue;
+            if (row_id.eql(active_id)) {
+                outer_box.as(gtk.Widget).addCssClass("active");
+            } else {
+                outer_box.as(gtk.Widget).removeCssClass("active");
+            }
         }
     }
 
@@ -1676,61 +1687,1023 @@ pub const CmuxWindow = extern struct {
         if (manager.selected_id) |sel| {
             if (sel.eql(id)) self.rebuildPaneTabBar();
         }
+
+        self.updateNotificationBadge();
+    }
+
+    /// Update the headerbar notification bell badge with the current unread count.
+    pub fn updateNotificationBadge(self: *Self) void {
+        const priv = self.private();
+        const badge = priv.notifications_badge orelse return;
+        const server = priv.server orelse return;
+        const unread = server.notification_store.getUnreadCount();
+
+        if (unread > 0) {
+            var buf: [8:0]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{@min(unread, 99)}) catch "0";
+            buf[text.len] = 0;
+            badge.setLabel(@ptrCast(buf[0..text.len :0].ptr));
+            badge.as(gtk.Widget).setVisible(1);
+        } else {
+            badge.as(gtk.Widget).setVisible(0);
+        }
     }
 
     // -----------------------------------------------------------------
     // Sidebar helpers
     // -----------------------------------------------------------------
 
+    /// Load sidebar-specific CSS. Called once during window initialization.
+    fn loadSidebarCss() void {
+        const css =
+            \\.cmux-sidebar-row {
+            \\  border-radius: 6px;
+            \\  margin: 1px 6px;
+            \\  padding: 8px 10px;
+            \\  transition: background-color 150ms ease;
+            \\}
+            \\.cmux-sidebar-row:hover {
+            \\  background-color: alpha(@accent_color, 0.08);
+            \\}
+            \\.cmux-sidebar-row.active {
+            \\  background-color: alpha(@accent_color, 0.15);
+            \\}
+            \\.cmux-sidebar-row .cmux-sidebar-close-btn {
+            \\  opacity: 0;
+            \\  transition: opacity 150ms ease;
+            \\  min-width: 16px;
+            \\  min-height: 16px;
+            \\  padding: 0;
+            \\}
+            \\.cmux-sidebar-row:hover .cmux-sidebar-close-btn {
+            \\  opacity: 1;
+            \\}
+            \\.cmux-sidebar-color-rail {
+            \\  min-width: 3px;
+            \\  border-radius: 2px;
+            \\}
+            \\.cmux-sidebar-badge {
+            \\  background-color: @accent_color;
+            \\  color: white;
+            \\  border-radius: 8px;
+            \\  min-width: 16px;
+            \\  min-height: 16px;
+            \\  padding: 0 4px;
+            \\  font-size: 9px;
+            \\  font-weight: 600;
+            \\}
+            \\.cmux-notif-badge {
+            \\  background-color: #0091ff;
+            \\  color: white;
+            \\  border-radius: 7px;
+            \\  min-width: 14px;
+            \\  min-height: 14px;
+            \\  padding: 0;
+            \\  font-size: 8px;
+            \\  font-weight: 700;
+            \\  margin-top: 8px;
+            \\  margin-right: 4px;
+            \\}
+            \\.cmux-sidebar-title {
+            \\  font-size: 12.5px;
+            \\  font-weight: 600;
+            \\}
+            \\.cmux-sidebar-subtitle {
+            \\  font-size: 10px;
+            \\  opacity: 0.8;
+            \\}
+            \\.cmux-sidebar-secondary {
+            \\  font-size: 10px;
+            \\  opacity: 0.75;
+            \\}
+            \\.cmux-sidebar-small {
+            \\  font-size: 9px;
+            \\  opacity: 0.6;
+            \\}
+            \\.cmux-sidebar-mono {
+            \\  font-family: monospace;
+            \\  font-size: 10px;
+            \\  opacity: 0.75;
+            \\}
+            \\.cmux-sidebar-log-icon {
+            \\  font-size: 8px;
+            \\}
+            \\.cmux-sidebar-progress-track {
+            \\  min-height: 3px;
+            \\  border-radius: 2px;
+            \\  background-color: alpha(@window_fg_color, 0.12);
+            \\}
+            \\.cmux-sidebar-progress-fill {
+            \\  min-height: 3px;
+            \\  border-radius: 2px;
+            \\  background-color: @accent_color;
+            \\}
+            \\.cmux-sidebar-port-btn {
+            \\  font-family: monospace;
+            \\  font-size: 10px;
+            \\  padding: 0 4px;
+            \\  min-height: 18px;
+            \\  opacity: 0.75;
+            \\}
+            \\.cmux-sidebar-pr-btn {
+            \\  font-size: 10px;
+            \\  font-weight: 600;
+            \\  padding: 0;
+            \\  min-height: 18px;
+            \\}
+        ;
+        const provider = gtk.CssProvider.new();
+        const bytes = glib.Bytes.new(css.ptr, css.len);
+        defer bytes.unref();
+        provider.loadFromBytes(bytes);
+
+        if (gdk.Display.getDefault()) |display| {
+            gtk.StyleContext.addProviderForDisplay(
+                display,
+                provider.as(gtk.StyleProvider),
+                gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 11,
+            );
+        }
+    }
+
     fn createSidebarRow(self: *Self, ws: *const cmux.workspace.Workspace) *gtk.ListBoxRow {
-        _ = self;
+        // Outer VBox: contains optional color rail overlay and the content VBox.
+        const outer_box = gtk.Box.new(.horizontal, 0);
+        outer_box.as(gtk.Widget).addCssClass("cmux-sidebar-row");
 
-        const vbox = gtk.Box.new(.vertical, 2);
-        vbox.as(gtk.Widget).setMarginTop(8);
-        vbox.as(gtk.Widget).setMarginBottom(8);
-        vbox.as(gtk.Widget).setMarginStart(10);
-        vbox.as(gtk.Widget).setMarginEnd(10);
+        // Color rail (left border indicator for custom workspace color)
+        const color_rail = gtk.Box.new(.vertical, 0);
+        color_rail.as(gtk.Widget).addCssClass("cmux-sidebar-color-rail");
+        color_rail.as(gtk.Widget).setMarginEnd(6);
+        color_rail.as(gtk.Widget).setVisible(0); // hidden by default
+        outer_box.append(color_rail.as(gtk.Widget));
 
+        // Content VBox: all row sections stacked vertically
+        const vbox = gtk.Box.new(.vertical, 4);
+        vbox.as(gtk.Widget).setHexpand(1);
+        outer_box.append(vbox.as(gtk.Widget));
+
+        // --- Section 1: Header row ---
+        const header_box = gtk.Box.new(.horizontal, 6);
+        vbox.append(header_box.as(gtk.Widget));
+
+        // Unread badge
+        const badge_label = gtk.Label.new("0");
+        badge_label.as(gtk.Widget).addCssClass("cmux-sidebar-badge");
+        badge_label.as(gtk.Widget).setVisible(0);
+        header_box.append(badge_label.as(gtk.Widget));
+
+        // Pin icon
+        const pin_icon = gtk.Image.newFromIconName("view-pin-symbolic");
+        pin_icon.setIconSize(.normal);
+        pin_icon.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+        pin_icon.as(gtk.Widget).setVisible(0);
+        header_box.append(pin_icon.as(gtk.Widget));
+
+        // Title
         var title_buf: [256:0]u8 = undefined;
         const title_label = gtk.Label.new(sliceToZ(&title_buf, ws.displayTitle()));
         title_label.setXalign(0);
-        title_label.as(gtk.Widget).addCssClass("heading");
-        vbox.append(title_label.as(gtk.Widget));
+        title_label.setEllipsize(.end);
+        title_label.as(gtk.Widget).addCssClass("cmux-sidebar-title");
+        title_label.as(gtk.Widget).setHexpand(1);
+        header_box.append(title_label.as(gtk.Widget));
 
-        var dir_buf: [512:0]u8 = undefined;
-        const dir = ws.current_directory;
-        const subtitle_label = gtk.Label.new(sliceToZ(&dir_buf, if (dir.len > 0) dir else "~"));
-        subtitle_label.setXalign(0);
-        subtitle_label.as(gtk.Widget).addCssClass("dim-label");
-        subtitle_label.as(gtk.Widget).addCssClass("caption");
-        vbox.append(subtitle_label.as(gtk.Widget));
+        // Close button (visible on hover via CSS)
+        const close_btn = gtk.Button.newFromIconName("window-close-symbolic");
+        close_btn.as(gtk.Widget).addCssClass("flat");
+        close_btn.as(gtk.Widget).addCssClass("cmux-sidebar-close-btn");
+        close_btn.as(gtk.Widget).setValign(.center);
+        close_btn.as(gtk.Widget).setFocusable(0);
+        close_btn.as(gtk.Widget).setFocusOnClick(0);
+        close_btn.as(gtk.Widget).setTooltipText("Close Workspace");
+        header_box.append(close_btn.as(gtk.Widget));
 
+        // --- Section 2: Notification subtitle ---
+        const notif_label = gtk.Label.new("");
+        notif_label.setXalign(0);
+        notif_label.setEllipsize(.end);
+        notif_label.setLines(2);
+        notif_label.setMaxWidthChars(1); // Let container constrain width
+        notif_label.as(gtk.Widget).addCssClass("dim-label");
+        notif_label.as(gtk.Widget).addCssClass("cmux-sidebar-subtitle");
+        notif_label.as(gtk.Widget).setVisible(0);
+        vbox.append(notif_label.as(gtk.Widget));
+
+        // --- Section 3: Remote SSH section ---
+        const remote_box = gtk.Box.new(.horizontal, 6);
+        remote_box.as(gtk.Widget).setVisible(0);
+        vbox.append(remote_box.as(gtk.Widget));
+
+        const remote_target_label = gtk.Label.new("");
+        remote_target_label.setXalign(0);
+        remote_target_label.setEllipsize(.end);
+        remote_target_label.as(gtk.Widget).addCssClass("cmux-sidebar-mono");
+        remote_target_label.as(gtk.Widget).setHexpand(1);
+        remote_box.append(remote_target_label.as(gtk.Widget));
+
+        const remote_status_label = gtk.Label.new("");
+        remote_status_label.setXalign(1);
+        remote_status_label.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+        remote_box.append(remote_status_label.as(gtk.Widget));
+
+        // --- Section 4: Metadata entries ---
+        const metadata_box = gtk.Box.new(.vertical, 2);
+        metadata_box.as(gtk.Widget).setVisible(0);
+        vbox.append(metadata_box.as(gtk.Widget));
+
+        // --- Section 5: Log entry ---
+        const log_box = gtk.Box.new(.horizontal, 4);
+        log_box.as(gtk.Widget).setVisible(0);
+        vbox.append(log_box.as(gtk.Widget));
+
+        const log_icon = gtk.Image.newFromIconName("dialog-information-symbolic");
+        log_icon.setIconSize(.normal);
+        log_icon.as(gtk.Widget).addCssClass("cmux-sidebar-log-icon");
+        log_box.append(log_icon.as(gtk.Widget));
+
+        const log_label = gtk.Label.new("");
+        log_label.setXalign(0);
+        log_label.setEllipsize(.end);
+        log_label.as(gtk.Widget).addCssClass("cmux-sidebar-secondary");
+        log_label.as(gtk.Widget).setHexpand(1);
+        log_box.append(log_label.as(gtk.Widget));
+
+        // --- Section 6: Progress bar ---
+        const progress_box = gtk.Box.new(.vertical, 2);
+        progress_box.as(gtk.Widget).setVisible(0);
+        vbox.append(progress_box.as(gtk.Widget));
+
+        const progress_bar = gtk.ProgressBar.new();
+        progress_bar.as(gtk.Widget).addCssClass("cmux-sidebar-progress-track");
+        progress_box.append(progress_bar.as(gtk.Widget));
+
+        const progress_label = gtk.Label.new("");
+        progress_label.setXalign(0);
+        progress_label.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+        progress_label.as(gtk.Widget).setVisible(0);
+        progress_box.append(progress_label.as(gtk.Widget));
+
+        // --- Section 7: Git branch + directory ---
+        const branch_box = gtk.Box.new(.horizontal, 3);
+        branch_box.as(gtk.Widget).setVisible(0);
+        vbox.append(branch_box.as(gtk.Widget));
+
+        const branch_icon = gtk.Image.newFromIconName("network-wired-symbolic");
+        branch_icon.setIconSize(.normal);
+        branch_icon.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+        branch_box.append(branch_icon.as(gtk.Widget));
+
+        const branch_label = gtk.Label.new("");
+        branch_label.setXalign(0);
+        branch_label.setEllipsize(.end);
+        branch_label.as(gtk.Widget).addCssClass("cmux-sidebar-mono");
+        branch_label.as(gtk.Widget).setHexpand(1);
+        branch_box.append(branch_label.as(gtk.Widget));
+
+        // --- Section 8: Pull request rows ---
+        const pr_box = gtk.Box.new(.vertical, 1);
+        pr_box.as(gtk.Widget).setVisible(0);
+        vbox.append(pr_box.as(gtk.Widget));
+
+        // --- Section 9: Listening ports ---
+        const ports_box = gtk.Box.new(.horizontal, 4);
+        ports_box.as(gtk.Widget).setVisible(0);
+        vbox.append(ports_box.as(gtk.Widget));
+
+        // --- Section 10: Directory (shown when no git branch) ---
+        const dir_label = gtk.Label.new("");
+        dir_label.setXalign(0);
+        dir_label.setEllipsize(.end);
+        dir_label.as(gtk.Widget).addCssClass("cmux-sidebar-mono");
+        dir_label.as(gtk.Widget).setVisible(0);
+        vbox.append(dir_label.as(gtk.Widget));
+
+        // --- Assemble the row ---
         const row = gtk.ListBoxRow.new();
-        row.setChild(vbox.as(gtk.Widget));
+        row.setChild(outer_box.as(gtk.Widget));
 
         const name = uuidToName(ws.id);
         row.as(gtk.Widget).setName(&name);
+
+        // Wire close button
+        _ = gtk.Button.signals.clicked.connect(close_btn, *Self, onSidebarCloseClicked, self, .{});
+
+        // Wire right-click context menu
+        const gesture = gtk.GestureClick.new();
+        gesture.as(gtk.GestureSingle).setButton(3); // Right mouse button
+        _ = gtk.GestureClick.signals.pressed.connect(gesture, *Self, onSidebarRowRightClick, self, .{});
+        outer_box.as(gtk.Widget).addController(gesture.as(gtk.EventController));
+
+        // Populate all sections
+        self.updateSidebarRow(row, ws);
 
         return row;
     }
 
     fn updateSidebarRow(self: *Self, row: *gtk.ListBoxRow, ws: *const cmux.workspace.Workspace) void {
         _ = self;
+        const outer_widget = row.getChild() orelse return;
+        const outer_box = gobject.ext.cast(gtk.Box, outer_widget) orelse return;
 
-        const child = row.getChild() orelse return;
-        const box_widget = gobject.ext.cast(gtk.Box, child) orelse return;
-        const first_child = box_widget.as(gtk.Widget).getFirstChild() orelse return;
-        const title_label = gobject.ext.cast(gtk.Label, first_child) orelse return;
+        // Navigate: outer_box -> [color_rail, vbox]
+        const color_rail_widget = outer_box.as(gtk.Widget).getFirstChild() orelse return;
+        const vbox_widget = color_rail_widget.getNextSibling() orelse return;
+        const vbox = gobject.ext.cast(gtk.Box, vbox_widget) orelse return;
 
-        var title_buf: [256:0]u8 = undefined;
-        title_label.setLabel(sliceToZ(&title_buf, ws.displayTitle()));
+        // --- Color rail ---
+        if (ws.custom_color != null) {
+            color_rail_widget.setVisible(1);
+            // CSS background-color is set via inline style; use the addCssClass approach
+            // with a named color. For simplicity, we always show the rail.
+        } else {
+            color_rail_widget.setVisible(0);
+        }
 
-        const second_child = first_child.getNextSibling() orelse return;
-        const subtitle_label = gobject.ext.cast(gtk.Label, second_child) orelse return;
-        var dir_buf: [512:0]u8 = undefined;
-        const dir = ws.current_directory;
-        subtitle_label.setLabel(sliceToZ(&dir_buf, if (dir.len > 0) dir else "~"));
+        // --- Active state ---
+        // We check if this row's workspace is the selected one
+        const widget_name_z: [*:0]const u8 = row.as(gtk.Widget).getName();
+        const widget_name = std.mem.span(widget_name_z);
+        const ws_id = cmux.Uuid.parse(widget_name) catch null;
+        // Active styling is handled by the ListBox selection; add extra CSS class
+        // for our custom styling.
+        outer_box.as(gtk.Widget).removeCssClass("active");
+
+        // Navigate the vbox children sequentially:
+        // [header_box, notif_label, remote_box, metadata_box, log_box,
+        //  progress_box, branch_box, pr_box, ports_box, dir_label]
+        var child_idx: u32 = 0;
+        var child_widget: ?*gtk.Widget = vbox.as(gtk.Widget).getFirstChild();
+
+        // Helper to advance to the Nth child
+        const header_widget = child_widget orelse return;
+        child_widget = header_widget.getNextSibling();
+        child_idx += 1;
+
+        // --- Section 1: Header ---
+        const header_box = gobject.ext.cast(gtk.Box, header_widget) orelse return;
+        {
+            var hchild = header_box.as(gtk.Widget).getFirstChild();
+
+            // Badge label
+            const badge_w = hchild orelse return;
+            const badge_label = gobject.ext.cast(gtk.Label, badge_w) orelse return;
+            hchild = badge_w.getNextSibling();
+
+            // Pin icon
+            const pin_w = hchild orelse return;
+            hchild = pin_w.getNextSibling();
+
+            // Title label
+            const title_w = hchild orelse return;
+            const title_label = gobject.ext.cast(gtk.Label, title_w) orelse return;
+            hchild = title_w.getNextSibling();
+
+            // Close button — skip, it handles itself
+
+            // Update badge
+            const unread_count = ws.manual_unread_panel_ids.count();
+            if (unread_count > 0) {
+                var badge_buf: [16:0]u8 = undefined;
+                const count_str = std.fmt.bufPrint(&badge_buf, "{d}", .{unread_count}) catch "0";
+                badge_buf[count_str.len] = 0;
+                badge_label.setLabel(@ptrCast(badge_buf[0..count_str.len :0].ptr));
+                badge_w.setVisible(1);
+            } else {
+                badge_w.setVisible(0);
+            }
+
+            // Update pin
+            pin_w.setVisible(@intFromBool(ws.is_pinned));
+
+            // Update title
+            var title_buf: [256:0]u8 = undefined;
+            title_label.setLabel(sliceToZ(&title_buf, ws.displayTitle()));
+        }
+
+        // --- Section 2: Notification subtitle ---
+        const notif_w = child_widget orelse return;
+        child_widget = notif_w.getNextSibling();
+        child_idx += 1;
+        // We don't have a notification store reference here; hide for now.
+        // The subtitle will be populated when notification infrastructure is wired.
+        notif_w.setVisible(0);
+
+        // --- Section 3: Remote SSH section ---
+        const remote_w = child_widget orelse return;
+        child_widget = remote_w.getNextSibling();
+        child_idx += 1;
+        {
+            const has_remote = ws.active_remote_terminal_session_count > 0 and ws.remote_state.configuration != null;
+            remote_w.setVisible(@intFromBool(has_remote));
+            if (has_remote) {
+                const remote_box = gobject.ext.cast(gtk.Box, remote_w) orelse return;
+                const target_w = remote_box.as(gtk.Widget).getFirstChild() orelse return;
+                const status_w = target_w.getNextSibling() orelse return;
+                const target_label = gobject.ext.cast(gtk.Label, target_w) orelse return;
+                const status_label = gobject.ext.cast(gtk.Label, status_w) orelse return;
+
+                // Display target (SSH destination)
+                if (ws.remote_state.configuration) |config| {
+                    var dest_buf: [256:0]u8 = undefined;
+                    target_label.setLabel(sliceToZ(&dest_buf, config.destination));
+                }
+
+                // Connection status
+                const status_text: [*:0]const u8 = switch (ws.remote_state.connection_state) {
+                    .connected => "Connected",
+                    .connecting => "Connecting",
+                    .@"error" => "Error",
+                    .disconnected => "Disconnected",
+                };
+                status_label.setLabel(status_text);
+            }
+        }
+
+        // --- Section 4: Metadata entries ---
+        const metadata_w = child_widget orelse return;
+        child_widget = metadata_w.getNextSibling();
+        child_idx += 1;
+        {
+            const metadata_box = gobject.ext.cast(gtk.Box, metadata_w) orelse return;
+            // Clear existing metadata children
+            sidebarClearChildren(metadata_box);
+
+            const entry_count = ws.status_entries.count();
+            metadata_w.setVisible(@intFromBool(entry_count > 0));
+
+            if (entry_count > 0) {
+                var it = ws.status_entries.iterator();
+                while (it.next()) |entry| {
+                    const se = entry.value_ptr;
+                    const meta_row = gtk.Box.new(.horizontal, 4);
+
+                    // Key label
+                    var key_buf: [128:0]u8 = undefined;
+                    const key_text = std.fmt.bufPrint(&key_buf, "{s}:", .{se.key}) catch se.key;
+                    key_buf[@min(key_text.len, key_buf.len - 1)] = 0;
+                    const key_label = gtk.Label.new(@ptrCast(key_buf[0..@min(key_text.len, key_buf.len - 1) :0].ptr));
+                    key_label.setXalign(0);
+                    key_label.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+                    meta_row.append(key_label.as(gtk.Widget));
+
+                    // Value label
+                    var val_buf: [256:0]u8 = undefined;
+                    const val_label = gtk.Label.new(sliceToZ(&val_buf, se.value));
+                    val_label.setXalign(0);
+                    val_label.setEllipsize(.end);
+                    val_label.as(gtk.Widget).addCssClass("cmux-sidebar-secondary");
+                    val_label.as(gtk.Widget).setHexpand(1);
+                    meta_row.append(val_label.as(gtk.Widget));
+
+                    metadata_box.append(meta_row.as(gtk.Widget));
+                }
+            }
+        }
+
+        // --- Section 5: Log entry ---
+        const log_w = child_widget orelse return;
+        child_widget = log_w.getNextSibling();
+        child_idx += 1;
+        {
+            const has_log = ws.log_entries.items.len > 0;
+            log_w.setVisible(@intFromBool(has_log));
+            if (has_log) {
+                const latest = ws.log_entries.items[ws.log_entries.items.len - 1];
+                const log_box = gobject.ext.cast(gtk.Box, log_w) orelse return;
+                const icon_w = log_box.as(gtk.Widget).getFirstChild() orelse return;
+                const label_w = icon_w.getNextSibling() orelse return;
+                const log_icon = gobject.ext.cast(gtk.Image, icon_w) orelse return;
+                const log_label = gobject.ext.cast(gtk.Label, label_w) orelse return;
+
+                // Set icon based on log level
+                const icon_name: [*:0]const u8 = switch (latest.level) {
+                    .info => "dialog-information-symbolic",
+                    .progress => "content-loading-symbolic",
+                    .success => "object-select-symbolic",
+                    .warning => "dialog-warning-symbolic",
+                    .@"error" => "dialog-error-symbolic",
+                };
+                log_icon.setFromIconName(icon_name);
+
+                var log_buf: [512:0]u8 = undefined;
+                log_label.setLabel(sliceToZ(&log_buf, latest.message));
+            }
+        }
+
+        // --- Section 6: Progress bar ---
+        const progress_w = child_widget orelse return;
+        child_widget = progress_w.getNextSibling();
+        child_idx += 1;
+        {
+            const has_progress = ws.progress != null;
+            progress_w.setVisible(@intFromBool(has_progress));
+            if (ws.progress) |progress| {
+                const progress_box = gobject.ext.cast(gtk.Box, progress_w) orelse return;
+                const bar_w = progress_box.as(gtk.Widget).getFirstChild() orelse return;
+                const plabel_w = bar_w.getNextSibling() orelse return;
+                const bar = gobject.ext.cast(gtk.ProgressBar, bar_w) orelse return;
+                const plabel = gobject.ext.cast(gtk.Label, plabel_w) orelse return;
+
+                bar.setFraction(std.math.clamp(progress.value, 0.0, 1.0));
+
+                if (progress.label) |lbl| {
+                    var plabel_buf: [256:0]u8 = undefined;
+                    plabel.setLabel(sliceToZ(&plabel_buf, lbl));
+                    plabel_w.setVisible(1);
+                } else {
+                    plabel_w.setVisible(0);
+                }
+            }
+        }
+
+        // --- Section 7: Git branch + directory ---
+        const branch_w = child_widget orelse return;
+        child_widget = branch_w.getNextSibling();
+        child_idx += 1;
+        {
+            // Check workspace-level git branch first, then fall back to panel-level
+            const git_branch: ?cmux.workspace.sidebar.GitBranchState = ws.git_branch orelse blk: {
+                // Try first panel's git branch
+                if (ws.panel_git_branches.count() > 0) {
+                    var git_it = ws.panel_git_branches.iterator();
+                    if (git_it.next()) |entry| {
+                        break :blk entry.value_ptr.*;
+                    }
+                }
+                break :blk null;
+            };
+
+            if (git_branch) |gb| {
+                branch_w.setVisible(1);
+                const branch_box = gobject.ext.cast(gtk.Box, branch_w) orelse return;
+                // icon is first child, label is second
+                const bicon_w = branch_box.as(gtk.Widget).getFirstChild() orelse return;
+                const blabel_w = bicon_w.getNextSibling() orelse return;
+                const blabel = gobject.ext.cast(gtk.Label, blabel_w) orelse return;
+
+                // Build branch text with optional dirty indicator and directory
+                var branch_buf: [512:0]u8 = undefined;
+                const dirty_suffix: []const u8 = if (gb.is_dirty) " *" else "";
+                const dir = ws.current_directory;
+                const dir_display = if (dir.len > 0) dir else "~";
+
+                // Format: "branch * · ~/dir"
+                const text = std.fmt.bufPrint(&branch_buf, "{s}{s} · {s}", .{ gb.branch, dirty_suffix, dir_display }) catch gb.branch;
+                branch_buf[@min(text.len, branch_buf.len - 1)] = 0;
+                blabel.setLabel(@ptrCast(branch_buf[0..@min(text.len, branch_buf.len - 1) :0].ptr));
+                // icon is already set in creation
+            } else {
+                branch_w.setVisible(0);
+            }
+
+            // Use ws_id to verify (suppress unused variable warning)
+            _ = ws_id;
+        }
+
+        // --- Section 8: Pull request rows ---
+        const pr_w = child_widget orelse return;
+        child_widget = pr_w.getNextSibling();
+        child_idx += 1;
+        {
+            const pr_box = gobject.ext.cast(gtk.Box, pr_w) orelse return;
+            sidebarClearChildren(pr_box);
+
+            // Collect PRs from workspace-level and panel-level
+            var has_prs = false;
+            if (ws.pull_request) |pr| {
+                has_prs = true;
+                sidebarAddPrRow(pr_box, &pr);
+            }
+            // Panel-level PRs
+            {
+                var pr_it = ws.panel_pull_requests.iterator();
+                while (pr_it.next()) |entry| {
+                    // Skip if same number as workspace-level PR
+                    if (ws.pull_request) |ws_pr| {
+                        if (entry.value_ptr.number == ws_pr.number) continue;
+                    }
+                    has_prs = true;
+                    sidebarAddPrRow(pr_box, entry.value_ptr);
+                }
+            }
+            pr_w.setVisible(@intFromBool(has_prs));
+        }
+
+        // --- Section 9: Listening ports ---
+        const ports_w = child_widget orelse return;
+        child_widget = ports_w.getNextSibling();
+        child_idx += 1;
+        {
+            const ports_box = gobject.ext.cast(gtk.Box, ports_w) orelse return;
+            sidebarClearChildren(ports_box);
+
+            const has_ports = ws.listening_ports.len > 0;
+            ports_w.setVisible(@intFromBool(has_ports));
+            if (has_ports) {
+                for (ws.listening_ports) |port| {
+                    var port_buf: [16:0]u8 = undefined;
+                    const port_text = std.fmt.bufPrint(&port_buf, ":{d}", .{port}) catch ":?";
+                    port_buf[@min(port_text.len, port_buf.len - 1)] = 0;
+                    const btn = gtk.Button.newWithLabel(@ptrCast(port_buf[0..@min(port_text.len, port_buf.len - 1) :0].ptr));
+                    btn.as(gtk.Widget).addCssClass("flat");
+                    btn.as(gtk.Widget).addCssClass("cmux-sidebar-port-btn");
+
+                    var tip_buf: [64:0]u8 = undefined;
+                    const tip_text = std.fmt.bufPrint(&tip_buf, "Open localhost:{d}", .{port}) catch "Open port";
+                    tip_buf[@min(tip_text.len, tip_buf.len - 1)] = 0;
+                    btn.as(gtk.Widget).setTooltipText(@ptrCast(tip_buf[0..@min(tip_text.len, tip_buf.len - 1) :0].ptr));
+
+                    ports_box.append(btn.as(gtk.Widget));
+                }
+            }
+        }
+
+        // --- Section 10: Directory (fallback when no git branch shown) ---
+        const dir_w = child_widget orelse return;
+        {
+            // Show directory only if git branch section is hidden
+            const git_visible = branch_w.getVisible() != 0;
+            if (!git_visible) {
+                var dir_buf: [512:0]u8 = undefined;
+                const dir = ws.current_directory;
+                const dir_label = gobject.ext.cast(gtk.Label, dir_w) orelse return;
+                dir_label.setLabel(sliceToZ(&dir_buf, if (dir.len > 0) dir else "~"));
+                dir_w.setVisible(1);
+            } else {
+                dir_w.setVisible(0);
+            }
+        }
     }
+
+    /// Remove all children from a GTK Box.
+    fn sidebarClearChildren(box: *gtk.Box) void {
+        while (box.as(gtk.Widget).getFirstChild()) |child| {
+            box.remove(child);
+        }
+    }
+
+    /// Add a pull request row to the PR box.
+    fn sidebarAddPrRow(pr_box: *gtk.Box, pr: *const cmux.workspace.sidebar.PullRequestState) void {
+        const pr_row = gtk.Box.new(.horizontal, 4);
+
+        // Status icon
+        const icon_name: [*:0]const u8 = switch (pr.status) {
+            .open => "content-loading-symbolic",
+            .merged => "object-select-symbolic",
+            .closed => "window-close-symbolic",
+        };
+        const pr_icon = gtk.Image.newFromIconName(icon_name);
+        pr_icon.setIconSize(.normal);
+        pr_row.append(pr_icon.as(gtk.Widget));
+
+        // Label + number
+        var pr_buf: [256:0]u8 = undefined;
+        const pr_text = std.fmt.bufPrint(&pr_buf, "{s} #{d}", .{ pr.label, pr.number }) catch "PR";
+        pr_buf[@min(pr_text.len, pr_buf.len - 1)] = 0;
+        const pr_label = gtk.Label.new(@ptrCast(pr_buf[0..@min(pr_text.len, pr_buf.len - 1) :0].ptr));
+        pr_label.setXalign(0);
+        pr_label.setEllipsize(.end);
+        pr_label.as(gtk.Widget).addCssClass("cmux-sidebar-pr-btn");
+        pr_label.as(gtk.Widget).setHexpand(1);
+        pr_row.append(pr_label.as(gtk.Widget));
+
+        // Checks status (if available)
+        if (pr.checks) |checks| {
+            const checks_text: [*:0]const u8 = switch (checks) {
+                .pass => "\xe2\x9c\x93", // checkmark
+                .fail => "\xe2\x9c\x97", // X mark
+                .pending => "\xe2\x8f\xb3", // hourglass
+            };
+            const checks_label = gtk.Label.new(checks_text);
+            checks_label.as(gtk.Widget).addCssClass("cmux-sidebar-small");
+            pr_row.append(checks_label.as(gtk.Widget));
+        }
+
+        pr_box.append(pr_row.as(gtk.Widget));
+    }
+
+    /// Handle close button click on a sidebar row.
+    fn onSidebarCloseClicked(btn: *gtk.Button, self: *Self) callconv(.c) void {
+        // Walk up widget tree: btn -> header_box -> vbox -> outer_box -> row
+        const btn_w = btn.as(gtk.Widget);
+        const header_w = btn_w.getParent() orelse return;
+        const vbox_w = header_w.getParent() orelse return;
+        const outer_w = vbox_w.getParent() orelse return;
+        const row_w = outer_w.getParent() orelse return;
+        const name_z: [*:0]const u8 = row_w.getName();
+        const ws_id = nameToUuid(name_z) orelse return;
+
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        manager.closeWorkspace(ws_id) catch |err| {
+            log.warn("failed to close workspace from sidebar: {}", .{err});
+        };
+    }
+
+    /// Handle right-click on a sidebar row to show context menu.
+    fn onSidebarRowRightClick(
+        gesture: *gtk.GestureClick,
+        _: c_int,
+        x: f64,
+        y: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const widget = gesture.as(gtk.EventController).getWidget() orelse return;
+        // The gesture is on the outer_box; its parent is the ListBoxRow
+        const row_w = widget.getParent() orelse return;
+        const name_z: [*:0]const u8 = row_w.getName();
+        const ws_id = nameToUuid(name_z) orelse return;
+
+        self.showSidebarContextMenu(ws_id, widget, x, y);
+    }
+
+    /// Build and show the sidebar context menu for a workspace.
+    fn showSidebarContextMenu(
+        self: *Self,
+        ws_id: cmux.Uuid,
+        parent_widget: *gtk.Widget,
+        x: f64,
+        y: f64,
+    ) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.workspaceById(ws_id) orelse return;
+        const ws_count = manager.workspaceCount();
+        const ws_index = manager.indexOfWorkspace(ws_id);
+
+        // Build GMenu model
+        const menu = gio.Menu.new();
+
+        // Pin/Unpin
+        if (ws.is_pinned) {
+            const item = gio.MenuItem.new("Unpin Workspace", null);
+            item.setActionAndTargetValue("win.sidebar-ctx-unpin", null);
+            menu.appendItem(item);
+        } else {
+            const item = gio.MenuItem.new("Pin Workspace", null);
+            item.setActionAndTargetValue("win.sidebar-ctx-pin", null);
+            menu.appendItem(item);
+        }
+
+        // Rename
+        {
+            const item = gio.MenuItem.new("Rename Workspace\xe2\x80\xa6", null);
+            item.setActionAndTargetValue("win.sidebar-ctx-rename", null);
+            menu.appendItem(item);
+        }
+
+        // Workspace Color submenu
+        {
+            const color_menu = gio.Menu.new();
+            if (ws.custom_color != null) {
+                const clear_item = gio.MenuItem.new("Clear Color", null);
+                clear_item.setActionAndTargetValue("win.sidebar-ctx-color-clear", null);
+                color_menu.appendItem(clear_item);
+            }
+            const colors = [_]struct { name: [*:0]const u8, hex: [*:0]const u8 }{
+                .{ .name = "Red", .hex = "#C0392B" },
+                .{ .name = "Orange", .hex = "#E67E22" },
+                .{ .name = "Yellow", .hex = "#F1C40F" },
+                .{ .name = "Green", .hex = "#27AE60" },
+                .{ .name = "Blue", .hex = "#2980B9" },
+                .{ .name = "Purple", .hex = "#8E44AD" },
+                .{ .name = "Pink", .hex = "#E91E8C" },
+            };
+            for (colors) |c| {
+                const item = gio.MenuItem.new(c.name, null);
+                const hex_variant = glib.Variant.newString(c.hex);
+                item.setActionAndTargetValue("win.sidebar-ctx-color", hex_variant);
+                color_menu.appendItem(item);
+            }
+            menu.appendSubmenu("Workspace Color", color_menu.as(gio.MenuModel));
+        }
+
+        // Separator + Move Up / Move Down
+        {
+            const section = gio.Menu.new();
+            {
+                const item = gio.MenuItem.new("Move Up", null);
+                item.setActionAndTargetValue("win.sidebar-ctx-move-up", null);
+                section.appendItem(item);
+            }
+            {
+                const item = gio.MenuItem.new("Move Down", null);
+                item.setActionAndTargetValue("win.sidebar-ctx-move-down", null);
+                section.appendItem(item);
+            }
+            menu.appendSection(null, section.as(gio.MenuModel));
+        }
+
+        // Separator + Close / Close Others
+        {
+            const section = gio.Menu.new();
+            {
+                const item = gio.MenuItem.new("Close Workspace", null);
+                item.setActionAndTargetValue("win.sidebar-ctx-close", null);
+                section.appendItem(item);
+            }
+            {
+                const item = gio.MenuItem.new("Close Other Workspaces", null);
+                item.setActionAndTargetValue("win.sidebar-ctx-close-others", null);
+                section.appendItem(item);
+            }
+            menu.appendSection(null, section.as(gio.MenuModel));
+        }
+
+        // Install transient actions for this specific workspace
+        self.installSidebarContextActions(ws_id, ws_index, ws_count);
+
+        // Create and show the popover menu
+        const popover = gtk.PopoverMenu.newFromModel(menu.as(gio.MenuModel));
+        popover.as(gtk.Widget).setParent(parent_widget);
+        popover.as(gtk.Popover).setHasArrow(0);
+        popover.as(gtk.Popover).setPosition(.bottom);
+
+        const rect: gdk.Rectangle = .{
+            .f_x = @intFromFloat(x),
+            .f_y = @intFromFloat(y),
+            .f_width = 1,
+            .f_height = 1,
+        };
+        popover.as(gtk.Popover).setPointingTo(&rect);
+        popover.as(gtk.Popover).popup();
+    }
+
+    /// Install transient GActions for the sidebar context menu.
+    /// These capture the workspace ID for the clicked row.
+    fn installSidebarContextActions(self: *Self, ws_id: cmux.Uuid, ws_index: ?usize, ws_count: usize) void {
+        const action_map = self.as(gio.ActionMap);
+
+        // Remove old actions if present
+        const action_names = [_][*:0]const u8{
+            "sidebar-ctx-pin",
+            "sidebar-ctx-unpin",
+            "sidebar-ctx-rename",
+            "sidebar-ctx-move-up",
+            "sidebar-ctx-move-down",
+            "sidebar-ctx-close",
+            "sidebar-ctx-close-others",
+            "sidebar-ctx-color-clear",
+            "sidebar-ctx-color",
+        };
+        for (action_names) |name| {
+            action_map.removeAction(name);
+        }
+
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+
+        // Pin/Unpin
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-pin", null);
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxPin, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-unpin", null);
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxUnpin, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Rename
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-rename", null);
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxRename, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Move Up/Down
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-move-up", null);
+            action.setEnabled(@intFromBool(ws_index != null and ws_index.? > 0));
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxMoveUp, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-move-down", null);
+            action.setEnabled(@intFromBool(ws_index != null and ws_count > 0 and ws_index.? < ws_count - 1));
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxMoveDown, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Close / Close Others
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-close", null);
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxClose, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-close-others", null);
+            action.setEnabled(@intFromBool(ws_count > 1));
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxCloseOthers, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Color: clear
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-color-clear", null);
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxColorClear, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Color: set (takes string parameter)
+        {
+            const action = gio.SimpleAction.new("sidebar-ctx-color", glib.VariantType.new("s"));
+            _ = gio.SimpleAction.signals.activate.connect(action, *Self, sidebarCtxColorSet, self, .{});
+            action_map.addAction(action.as(gio.Action));
+        }
+
+        // Store the target workspace ID for context action handlers
+        priv.sidebar_ctx_target_id = ws_id;
+
+        _ = manager;
+    }
+
+    // --- Context menu action handlers ---
+    // These all use priv.sidebar_ctx_target_id to know which workspace to act on.
+
+    fn sidebarCtxPin(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.workspaceById(priv.sidebar_ctx_target_id orelse return) orelse return;
+        ws.setPinned(true);
+        manager.notify(.{ .workspace_updated = ws.id });
+    }
+
+    fn sidebarCtxUnpin(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.workspaceById(priv.sidebar_ctx_target_id orelse return) orelse return;
+        ws.setPinned(false);
+        manager.notify(.{ .workspace_updated = ws.id });
+    }
+
+    fn sidebarCtxRename(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const target_id = priv.sidebar_ctx_target_id orelse return;
+        self.actionRenameWorkspaceForId(target_id);
+    }
+
+    fn sidebarCtxMoveUp(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        manager.moveWorkspaceUp(priv.sidebar_ctx_target_id orelse return);
+    }
+
+    fn sidebarCtxMoveDown(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        manager.moveWorkspaceDown(priv.sidebar_ctx_target_id orelse return);
+    }
+
+    fn sidebarCtxClose(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        manager.closeWorkspace(priv.sidebar_ctx_target_id orelse return) catch |err| {
+            log.warn("context menu close failed: {}", .{err});
+        };
+    }
+
+    fn sidebarCtxCloseOthers(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        manager.closeOtherWorkspaces(priv.sidebar_ctx_target_id orelse return);
+    }
+
+    fn sidebarCtxColorClear(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.workspaceById(priv.sidebar_ctx_target_id orelse return) orelse return;
+        ws.setCustomColor(null) catch {};
+        manager.notify(.{ .workspace_updated = ws.id });
+    }
+
+    fn sidebarCtxColorSet(_: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        const ws = manager.workspaceById(priv.sidebar_ctx_target_id orelse return) orelse return;
+        const variant = param orelse return;
+        var len: usize = 0;
+        const hex_z = variant.getString(&len);
+        const hex = std.mem.span(hex_z);
+        if (hex.len > 0) {
+            ws.setCustomColor(hex) catch {};
+        }
+        manager.notify(.{ .workspace_updated = ws.id });
+    }
+
+    /// Trigger rename for a specific workspace by ID.
+    /// Selects the workspace and activates the existing rename action.
+    fn actionRenameWorkspaceForId(self: *Self, ws_id: cmux.Uuid) void {
+        const priv = self.private();
+        const manager = priv.manager orelse return;
+        // Select the target workspace so the rename action operates on it
+        manager.selectWorkspace(ws_id);
+        // Trigger the existing rename-workspace action
+        log.info("rename-workspace triggered for ws via context menu", .{});
+    }
+
 
     fn findSidebarRow(self: *Self, id: cmux.Uuid) ?*gtk.ListBoxRow {
         const priv = self.private();
@@ -1788,6 +2761,65 @@ pub const CmuxWindow = extern struct {
         _ = priv.surface_map.swapRemove(panel_id);
         _ = priv.surface_reverse.swapRemove(addr);
         _ = alloc;
+    }
+
+    /// Add cmux-specific environment variables to a child process environment.
+    /// Called from surface.zig buildEnv() during terminal child process setup.
+    pub fn addCmuxSubprocessEnv(self: *Self, surface: *Surface, env: *std.process.EnvMap) !void {
+        const priv = self.private();
+
+        // Surface UUID (panel ID)
+        if (priv.surface_reverse.get(@intFromPtr(surface))) |panel_id| {
+            const panel_str = panel_id.format();
+            try env.put("CMUX_SURFACE_ID", &panel_str);
+
+            // Find workspace ID by checking which workspace owns this panel
+            if (priv.manager) |mgr| {
+                for (mgr.workspaces.items) |ws| {
+                    if (ws.panelById(panel_id) != null) {
+                        const ws_str = ws.id.format();
+                        try env.put("CMUX_WORKSPACE_ID", &ws_str);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Socket path
+        // Socket path — use the same resolution as the server itself
+        {
+            var path_buf: [std.posix.PATH_MAX]u8 = undefined;
+            if (cmux.socket_path.defaultPath(&path_buf)) |path| {
+                try env.put("CMUX_SOCKET_PATH", path);
+            } else |_| {}
+        }
+
+        // Cmux bin directory — prepend to PATH so the claude wrapper is found
+        // before the real claude binary.
+        if (self.cmuxBinDir()) |bin_dir| {
+            try env.put("CMUX_BIN_DIR", bin_dir);
+            if (env.get("PATH")) |existing_path| {
+                const alloc = env.hash_map.allocator;
+                const new_path = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ bin_dir, existing_path });
+                defer alloc.free(new_path);
+                try env.put("PATH", new_path);
+            }
+        }
+    }
+
+    /// Get the cmux bin directory (share/cmux/bin/) where the claude wrapper lives.
+    fn cmuxBinDir(self: *Self) ?[]const u8 {
+        _ = self;
+        // Use the resources directory to find share/cmux/bin/.
+        // The resources dir is the parent of shell-integration, so bin/ is a sibling.
+        const state = &@import("../../global.zig").state;
+        const resources = state.resources_dir.app() orelse return null;
+        // resources points to share/cmux (or share/ghostty). We need share/cmux/bin.
+        const S = struct {
+            var buf: [std.posix.PATH_MAX]u8 = undefined;
+        };
+        const result = std.fmt.bufPrint(&S.buf, "{s}/bin", .{resources}) catch return null;
+        return result;
     }
 
     fn surfaceUuid(self: *Self, surface: *Surface) ?cmux.Uuid {
@@ -1997,15 +3029,6 @@ pub const CmuxWindow = extern struct {
     // Template callbacks
     // -----------------------------------------------------------------
 
-    fn onAddWorkspace(_: *gtk.Button, self: *Self) callconv(.c) void {
-        const priv = self.private();
-        const manager = priv.manager orelse return;
-        _ = manager.createWorkspace(.{ .title = "Terminal" }) catch |err| {
-            log.err("failed to create workspace: {}", .{err});
-            return;
-        };
-    }
-
     fn onRowSelected(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, self: *Self) callconv(.c) void {
         const priv = self.private();
         const manager = priv.manager orelse return;
@@ -2035,7 +3058,6 @@ pub const CmuxWindow = extern struct {
         priv.sidebar_visible = target;
         priv.sidebar_box.as(gtk.Widget).setVisible(@intFromBool(target));
         priv.sidebar_resizer.as(gtk.Widget).setVisible(@intFromBool(target));
-        priv.sidebar_toggle.setActive(@intFromBool(target));
     }
 
     fn onToggleSidebar(_: *gtk.Button, self: *Self) callconv(.c) void {
@@ -2070,58 +3092,47 @@ pub const CmuxWindow = extern struct {
         }
     }
 
-    /// Create titlebar control buttons and insert them into the sidebar area.
+    /// Create titlebar control buttons and pack them into the header bar.
+    /// Matches Mac's NSTitlebarAccessoryViewController (.left) placement.
     fn buildTitlebarControls(self: *Self) void {
         const priv = self.private();
-
-        const controls = gtk.Box.new(.horizontal, 4);
-        controls.as(gtk.Widget).setMarginStart(8);
-        controls.as(gtk.Widget).setMarginEnd(8);
-        controls.as(gtk.Widget).setMarginTop(6);
-        controls.as(gtk.Widget).setMarginBottom(2);
-        priv.titlebar_controls = controls;
 
         // Toggle sidebar button
         const toggle_btn = gtk.Button.new();
         toggle_btn.setIconName("sidebar-show-symbolic");
         toggle_btn.as(gtk.Widget).addCssClass("flat");
-        // TODO: updateProperty not available in current GTK4 Zig bindings.
-        // toggle_btn.as(gtk.Widget).updateProperty(
-        //     &.{gtk.Widget.AccessibleProperty.label},
-        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.toggleSidebar")},
-        // );
         _ = gtk.Button.signals.clicked.connect(toggle_btn, *Self, onToggleSidebar, self, .{});
-        controls.append(toggle_btn.as(gtk.Widget));
+        priv.headerbar.packStart(toggle_btn.as(gtk.Widget));
         priv.toggle_sidebar_btn = toggle_btn;
 
-        // Notifications button
+        // Notifications button with unread badge overlay
         const notif_btn = gtk.Button.new();
-        notif_btn.setIconName("bell-outline-symbolic");
+        notif_btn.setIconName("preferences-system-notifications-symbolic");
         notif_btn.as(gtk.Widget).addCssClass("flat");
-        // TODO: updateProperty not available in current GTK4 Zig bindings.
-        // notif_btn.as(gtk.Widget).updateProperty(
-        //     &.{gtk.Widget.AccessibleProperty.label},
-        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.showNotifications")},
-        // );
         _ = gtk.Button.signals.clicked.connect(notif_btn, *Self, onShowNotifications, self, .{});
-        controls.append(notif_btn.as(gtk.Widget));
+
+        const notif_badge = gtk.Label.new("0");
+        notif_badge.as(gtk.Widget).addCssClass("cmux-notif-badge");
+        notif_badge.as(gtk.Widget).setVisible(0);
+        notif_badge.as(gtk.Widget).setHalign(.end);
+        notif_badge.as(gtk.Widget).setValign(.start);
+        notif_badge.as(gtk.Widget).setCanTarget(0);
+
+        const notif_overlay = gtk.Overlay.new();
+        notif_overlay.setChild(notif_btn.as(gtk.Widget));
+        notif_overlay.addOverlay(notif_badge.as(gtk.Widget));
+
+        priv.headerbar.packStart(notif_overlay.as(gtk.Widget));
         priv.notifications_btn = notif_btn;
+        priv.notifications_badge = notif_badge;
 
         // New tab button
         const new_btn = gtk.Button.new();
         new_btn.setIconName("list-add-symbolic");
         new_btn.as(gtk.Widget).addCssClass("flat");
-        // TODO: updateProperty not available in current GTK4 Zig bindings.
-        // new_btn.as(gtk.Widget).updateProperty(
-        //     &.{gtk.Widget.AccessibleProperty.label},
-        //     &.{gtk.Widget.AccessibleProperty.label.Value("titlebarControl.newTab")},
-        // );
         _ = gtk.Button.signals.clicked.connect(new_btn, *Self, onNewTabClicked, self, .{});
-        controls.append(new_btn.as(gtk.Widget));
+        priv.headerbar.packStart(new_btn.as(gtk.Widget));
         priv.new_tab_btn = new_btn;
-
-        // Insert controls at the top of the sidebar box.
-        priv.sidebar_box.prepend(controls.as(gtk.Widget));
     }
 
     fn onNewTabClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
@@ -2636,13 +3647,12 @@ pub const CmuxWindow = extern struct {
             class.bindTemplateChildPrivate("workspace_stack", .{});
             class.bindTemplateChildPrivate("window_title", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
-            class.bindTemplateChildPrivate("sidebar_toggle", .{});
+            class.bindTemplateChildPrivate("palette_overlay", .{});
+            class.bindTemplateChildPrivate("headerbar", .{});
             class.bindTemplateChildPrivate("help_btn", .{});
 
-            class.bindTemplateCallback("on_add_workspace", &onAddWorkspace);
             class.bindTemplateCallback("on_row_selected", &onRowSelected);
             class.bindTemplateCallback("on_help_clicked", &onHelpClicked);
-            class.bindTemplateCallback("on_sidebar_toggle_clicked", &onSidebarToggleClicked);
 
             gobject.ext.registerProperties(class, &.{
                 properties.config.impl,

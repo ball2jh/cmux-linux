@@ -3972,7 +3972,7 @@ pub fn loadOptionalFile(
     if (self.loadFile(alloc, path)) {
         return .loaded;
     } else |err| switch (err) {
-        error.FileNotFound => return .not_found,
+        error.FileNotFound, error.FileIsEmpty => return .not_found,
         else => {
             std.log.warn(
                 "error reading optional config file, not loading err={} path={s}",

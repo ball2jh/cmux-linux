@@ -10,135 +10,119 @@ template $CmuxWindow: Adw.ApplicationWindow {
   default-height: 700;
   handle-menubar-accel: false;
 
-  // Horizontal box with sidebar, drag-resizer, and content.
-  // Replaces OverlaySplitView so we can add a user-draggable resize handle.
-  content: Gtk.Box main_hbox {
-    orientation: horizontal;
+  // Outer ToolbarView: full-width header bar above everything (matches Mac
+  // NSTitlebarAccessoryViewController layout).
+  content: Adw.ToolbarView {
 
-    // --- Sidebar container ---
-    Gtk.Box sidebar_box {
-      orientation: vertical;
-      width-request: 200;
+    [top]
+    Adw.HeaderBar headerbar {
+      show-start-title-buttons: true;
 
-      accessibility {
-        label: "Sidebar";
+      title-widget: Adw.WindowTitle window_title {
+        title: "cmux";
+      };
+
+      // Titlebar control buttons (sidebar toggle, notifications, new tab)
+      // are added programmatically via buildTitlebarControls().
+
+      [end]
+      Gtk.MenuButton {
+        icon-name: "open-menu-symbolic";
+        menu-model: main_menu;
+        tooltip-text: "Main Menu";
+        can-focus: false;
       }
+    }
 
-      Gtk.ScrolledWindow {
-        hscrollbar-policy: never;
-        vexpand: true;
+    // Horizontal box with sidebar, drag-resizer, and content.
+    Gtk.Box main_hbox {
+      orientation: horizontal;
 
-        Gtk.Box {
-          orientation: vertical;
+      // --- Sidebar container ---
+      Gtk.Box sidebar_box {
+        orientation: vertical;
+        width-request: 200;
 
-          Gtk.ListBox sidebar_list {
-            selection-mode: single;
+        accessibility {
+          label: "Sidebar";
+        }
 
-            accessibility {
-              label: "Workspace List";
-            }
-
-            row-selected => $on_row_selected();
-            vexpand: true;
-
-            styles [
-              "navigation-sidebar",
-            ]
-          }
+        Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+          vexpand: true;
 
           Gtk.Box {
-            orientation: horizontal;
-            halign: fill;
-            margin-start: 8;
-            margin-end: 8;
-            margin-top: 4;
-            margin-bottom: 8;
+            orientation: vertical;
 
-            Gtk.Button add_workspace_btn {
-              icon-name: "list-add-symbolic";
-              tooltip-text: "New Workspace";
-              clicked => $on_add_workspace();
-              can-focus: false;
-              focus-on-click: false;
+            Gtk.ListBox sidebar_list {
+              selection-mode: single;
+
+              accessibility {
+                label: "Workspace List";
+              }
+
+              row-selected => $on_row_selected();
+              vexpand: true;
 
               styles [
-                "flat",
+                "navigation-sidebar",
               ]
             }
 
             Gtk.Box {
-              hexpand: true;
-            }
+              orientation: horizontal;
+              halign: fill;
+              margin-start: 8;
+              margin-end: 8;
+              margin-top: 4;
+              margin-bottom: 8;
 
-            Gtk.Button help_btn {
-              icon-name: "help-about-symbolic";
-              tooltip-text: "Help";
-              clicked => $on_help_clicked();
-              can-focus: false;
-              focus-on-click: false;
+              Gtk.Button help_btn {
+                icon-name: "help-about-symbolic";
+                tooltip-text: "Help";
+                clicked => $on_help_clicked();
+                can-focus: false;
+                focus-on-click: false;
 
-              accessibility {
-                label: "SidebarHelpMenuButton";
+                accessibility {
+                  label: "SidebarHelpMenuButton";
+                }
+
+                styles [
+                  "flat",
+                ]
               }
-
-              styles [
-                "flat",
-              ]
             }
           }
         }
       }
-    }
 
-    // --- Draggable resize handle ---
-    Gtk.Separator sidebar_resizer {
-      orientation: vertical;
+      // --- Draggable resize handle ---
+      Gtk.Separator sidebar_resizer {
+        orientation: vertical;
 
-      accessibility {
-        label: "SidebarResizer";
-      }
-
-      styles [
-        "sidebar-resizer",
-      ]
-    }
-
-    // --- Content area ---
-    Adw.ToolbarView toolbar {
-      hexpand: true;
-
-      [top]
-      Adw.HeaderBar headerbar {
-        show-start-title-buttons: false;
-
-        title-widget: Adw.WindowTitle window_title {
-          title: "cmux";
-        };
-
-        [start]
-        Gtk.ToggleButton sidebar_toggle {
-          icon-name: "sidebar-show-symbolic";
-          tooltip-text: "Toggle Sidebar";
-          clicked => $on_sidebar_toggle_clicked();
-          can-focus: false;
-          focus-on-click: false;
+        accessibility {
+          label: "SidebarResizer";
         }
 
-        [end]
-        Gtk.MenuButton {
-          icon-name: "open-menu-symbolic";
-          menu-model: main_menu;
-          tooltip-text: "Main Menu";
-          can-focus: false;
-        }
+        styles [
+          "sidebar-resizer",
+        ]
       }
 
-      Adw.ToastOverlay toast_overlay {
-        Gtk.Stack workspace_stack {
-          transition-type: crossfade;
-          transition-duration: 150;
-          vhomogeneous: true;
-          hhomogeneous: true;
+      // --- Content area (inner ToolbarView for pane tab bar) ---
+      Adw.ToolbarView content_toolbar {
+        hexpand: true;
+
+        Gtk.Overlay palette_overlay {
+          child: Adw.ToastOverlay toast_overlay {
+            Gtk.Stack workspace_stack {
+              transition-type: crossfade;
+              transition-duration: 150;
+              vhomogeneous: true;
+              hhomogeneous: true;
+            }
+          };
         }
       }
     }

@@ -1623,6 +1623,15 @@ pub const Surface = extern struct {
             }
         }
 
+        // Add cmux-specific environment variables (workspace ID, surface ID,
+        // socket path, bin dir) so the claude wrapper and hooks work.
+        if (comptime build_config.cmux) {
+            const cmux_gtk = @import("../../../cmux/gtk/window.zig");
+            if (ext.getAncestor(cmux_gtk.CmuxWindow, self.as(gtk.Widget))) |cmux_win| {
+                try cmux_win.addCmuxSubprocessEnv(self, &env);
+            }
+        }
+
         // Merge additional environment variables (e.g. session scrollback replay).
         if (self.private().overrides.additional_env) |pairs| {
             var i: usize = 0;
