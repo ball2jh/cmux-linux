@@ -130,6 +130,16 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         try steps.append(b.allocator, &install_step.step);
     }
 
+    // cmux bin directory (claude wrapper and other cmux-specific scripts)
+    if (cfg.cmux) {
+        const install_step = b.addInstallDirectory(.{
+            .source_dir = b.path("src/cmux/bin"),
+            .install_dir = .{ .custom = "share" },
+            .install_subdir = "cmux/bin",
+        });
+        try steps.append(b.allocator, &install_step.step);
+    }
+
     // Themes
     if (cfg.emit_themes) {
         if (b.lazyDependency("iterm2_themes", .{})) |upstream| {

@@ -22,6 +22,14 @@ zig build -Dcmux=true -Dversion-string="0.1.0-dev"
 
 `-Dcmux=true` is required — without it, a standard Ghostty binary is produced.
 
+## Run
+
+```bash
+./zig-out/bin/cmux
+```
+
+This is a GTK single-instance app. If an instance is already running, the new process activates the existing one and exits. To force a fresh instance, kill existing ones first: `pkill -f cmux`.
+
 ## Pitfalls
 
 - **All cmux code in `src/cmux/`** — do not scatter cmux logic into Ghostty core files.
